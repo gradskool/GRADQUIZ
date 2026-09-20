@@ -245,3 +245,17 @@ section.block > h2 { margin-bottom: 16px; }
 .noc { color: var(--coral-ink); }
 .expl { margin-top: 18px; padding: 14px 16px; border-left: 4px solid var(--ink); background: #f6f6f6; }
 .expl p { margin-top: 4px; white-space: pre-wrap; }
+
+/* ---------- your results on the home page ---------- */
+.myresults { margin-top: clamp(48px, 9vh, 96px); padding-top: 32px; border-top: 1px solid var(--rule); max-width: 720px; }
+.mylist { list-style: none; margin: 20px 0 0; padding: 0; }
+.mylist li { display: grid; grid-template-columns: 1fr auto auto; gap: 8px 20px; align-items: center; padding: 16px 0; border-bottom: 1px solid var(--rule); }
+.mymain { display: flex; flex-direction: column; min-width: 0; }
+.mytitle { font-family: var(--serif); font-size: 1.15rem; overflow-wrap: anywhere; }
+.myscore { font-family: var(--serif); font-size: 1.25rem; font-variant-numeric: tabular-nums; white-space: nowrap; text-align: right; }
+.findall { margin-top: 28px; }
+@media (max-width: 560px) {
+  .mylist li { grid-template-columns: 1fr auto; }
+  .mylist li .myscore { text-align: left; grid-column: 1; }
+  .mylist li .btn { grid-row: 1 / span 2; grid-column: 2; }
+}
