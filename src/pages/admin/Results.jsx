@@ -24,7 +24,7 @@ export default function Results() {
       await supabase.rpc('finalize_expired', { p_quiz: id })
       const q = check(await supabase.from('quizzes').select('*').eq('id', id).single())
       const questions = check(await supabase.from('questions').select('id, position, kind, body, options, correct_index, accepted').eq('quiz_id', id).order('position'))
-      const attempts = check(await supabase.from('attempts').select('id, token, name, email, status, submit_reason, started_at, submitted_at, answers, graded, correct, wrong, unattempted, score, time_taken_seconds').eq('quiz_id', id))
+      const attempts = check(await supabase.from('attempts').select('id, token, link_requested_at, name, email, status, submit_reason, started_at, submitted_at, answers, graded, correct, wrong, unattempted, score, time_taken_seconds').eq('quiz_id', id))
       setQuiz(q)
       setQs(questions)
       setRows(attempts)
@@ -184,7 +184,7 @@ export default function Results() {
                 {sorted.map((r) => (
                   <Fragment key={r.id}>
                     <tr>
-                      <td><b>{r.name}</b></td>
+                      <td><b>{r.name}</b>{r.link_requested_at && <span className="chip">Asked for link</span>}</td>
                       <td className="muted">{r.email}</td>
                       <td className="n"><b>{num(r.score)}</b></td>
                       <td className="n">{r.correct ?? '-'}</td>
@@ -200,7 +200,14 @@ export default function Results() {
                       <td>
                         <div className="row" style={{ gap: 16, flexWrap: 'nowrap' }}>
                           <button className="link" onClick={() => toggle(r.id)} aria-expanded={open.has(r.id)}>{open.has(r.id) ? 'Hide' : 'Answers'}</button>
-                          <button className="link" onClick={async () => { await copyText(linkFor(r)); toast('Link copied') }}>Copy link</button>
+                          <button className="link" onClick={async () => {
+                            await copyText(linkFor(r))
+                            toast('Link copied')
+                            if (r.link_requested_at) {
+                              await supabase.from('attempts').update({ link_requested_at: null }).eq('id', r.id)
+                              load()
+                            }
+                          }}>Copy link</button>
                         </div>
                       </td>
                     </tr>

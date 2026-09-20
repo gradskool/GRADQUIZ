@@ -48,6 +48,11 @@ export default function Home() {
   const [fErr, setFErr] = useState('')
   const [fBusy, setFBusy] = useState(false)
   const [searched, setSearched] = useState(false)
+  const [ask, setAsk] = useState(false)
+  const [askCode, setAskCode] = useState('')
+  const [askBusy, setAskBusy] = useState(false)
+  const [askDone, setAskDone] = useState(false)
+  const [askErr, setAskErr] = useState('')
   const box = useRef(null)
 
   // results already on this device, no typing needed
@@ -83,6 +88,22 @@ export default function Home() {
   function showResults() {
     setOpen(true)
     setTimeout(() => box.current?.scrollIntoView({ behavior: 'smooth', block: 'start' }), 50)
+  }
+
+  async function askInstructor(e) {
+    e.preventDefault()
+    setAskErr('')
+    if (askCode.trim().length < 4) return setAskErr('Enter the code of the quiz.')
+    if (!/^\S+@\S+\.\S+$/.test(email.trim())) return setAskErr('Enter the email you used for that quiz.')
+    setAskBusy(true)
+    try {
+      await rpc('request_result_link', { p_code: askCode, p_email: email })
+      setAskDone(true)
+    } catch (ex) {
+      setAskErr(ex.message)
+    } finally {
+      setAskBusy(false)
+    }
   }
 
   async function findAll(e) {
@@ -193,6 +214,41 @@ export default function Home() {
                 {fErr && <p className="error" role="alert">{fErr}</p>}
                 <div><button className="btn small" disabled={fBusy}>{fBusy ? 'Looking' : 'Find results'}</button></div>
               </form>
+            )}
+
+            {open && (
+              <div className="nopin">
+                <h3>No PIN, or forgot it?</h3>
+                <p className="muted small">
+                  Quizzes taken before PINs were added have none. If you took the quiz on this phone or computer, it is listed above.
+                  Open it to set a PIN. Otherwise ask your instructor to send you your personal link.
+                </p>
+                {askDone ? (
+                  <div className="notice plain" role="status">
+                    Request sent. Your instructor will send you your personal link. Open it to see your result and set a PIN.
+                  </div>
+                ) : !ask ? (
+                  <button className="btn ghost small" onClick={() => setAsk(true)}>Ask my instructor for my link</button>
+                ) : (
+                  <form className="stack" onSubmit={askInstructor} noValidate>
+                    <div className="grid2">
+                      <label className="field">
+                        <span>Code of that quiz</span>
+                        <input className="input" value={askCode} onChange={(e) => setAskCode(e.target.value.replace(/[^a-zA-Z0-9]/g, '').slice(0, 12))} autoComplete="off" autoCapitalize="characters" spellCheck="false" />
+                      </label>
+                      <label className="field">
+                        <span>Email you used</span>
+                        <input className="input" type="email" value={email} onChange={(e) => setEmail(e.target.value)} autoComplete="email" inputMode="email" />
+                      </label>
+                    </div>
+                    {askErr && <p className="error" role="alert">{askErr}</p>}
+                    <div className="row">
+                      <button className="btn small" disabled={askBusy}>{askBusy ? 'Sending' : 'Send request'}</button>
+                      <button type="button" className="link" onClick={() => setAsk(false)}>Cancel</button>
+                    </div>
+                  </form>
+                )}
+              </div>
             )}
           </section>
         )}

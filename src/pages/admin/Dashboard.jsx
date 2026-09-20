@@ -6,6 +6,7 @@ import { useToast } from '../../components/Toast.jsx'
 
 export default function Dashboard() {
   const [quizzes, setQuizzes] = useState(null)
+  const [asks, setAsks] = useState({})
   const [err, setErr] = useState('')
   const [busy, setBusy] = useState(false)
   const nav = useNavigate()
@@ -18,6 +19,12 @@ export default function Dashboard() {
         .select('id, code, title, status, duration_minutes, created_at, questions(count), attempts(count)')
         .order('created_at', { ascending: false }))
       setQuizzes(data)
+      const req = await supabase.from('attempts').select('quiz_id').not('link_requested_at', 'is', null)
+      if (!req.error) {
+        const m = {}
+        req.data.forEach((r) => { m[r.quiz_id] = (m[r.quiz_id] || 0) + 1 })
+        setAsks(m)
+      }
     } catch (e) {
       setErr(e.message)
     }
@@ -61,7 +68,10 @@ export default function Dashboard() {
             <tbody>
               {quizzes.map((q) => (
                 <tr key={q.id}>
-                  <td><Link to={`/admin/quiz/${q.id}`}><b>{q.title}</b></Link></td>
+                  <td>
+                    <Link to={`/admin/quiz/${q.id}`}><b>{q.title}</b></Link>
+                    {asks[q.id] > 0 && <Link to={`/admin/quiz/${q.id}/results`} className="chip">{asks[q.id]} asked for their link</Link>}
+                  </td>
                   <td><span className="codechip">{q.code}</span></td>
                   <td><span className={`status ${q.status}`}><i />{q.status === 'draft' ? 'Draft' : q.status === 'live' ? 'Live' : 'Ended'}</span></td>
                   <td className="n">{q.questions?.[0]?.count ?? 0}</td>
