@@ -3,7 +3,7 @@ import { rpc } from '../lib/supabase.js'
 import { useToast } from './Toast.jsx'
 
 // Start and End buttons with a confirm step.
-export default function QuizControls({ quiz, questionCount, onChange }) {
+export default function QuizControls({ quiz, questionCount, onChange, blocked = '' }) {
   const [ask, setAsk] = useState(null)
   const [busy, setBusy] = useState(false)
   const [err, setErr] = useState('')
@@ -28,12 +28,13 @@ export default function QuizControls({ quiz, questionCount, onChange }) {
     <>
       <div className="row">
         {quiz.status === 'draft' && (
-          <button className="btn" onClick={() => setAsk('live')} disabled={questionCount === 0}>Start quiz</button>
+          <button className="btn" onClick={() => setAsk('live')} disabled={questionCount === 0 || Boolean(blocked)}>Start quiz</button>
         )}
         {quiz.status === 'live' && (
           <button className="btn dark" onClick={() => setAsk('ended')}>End quiz</button>
         )}
-        {quiz.status === 'draft' && questionCount === 0 && <span className="muted small">Add a question to start.</span>}
+        {quiz.status === 'draft' && blocked && <span className="error small">{blocked}</span>}
+        {quiz.status === 'draft' && !blocked && questionCount === 0 && <span className="muted small">Add a question to start.</span>}
       </div>
       {err && !ask && <p className="error" role="alert">{err}</p>}
 
@@ -48,7 +49,7 @@ export default function QuizControls({ quiz, questionCount, onChange }) {
             ) : (
               <>
                 <h2 id="ctl-h">End this quiz?</h2>
-                <p>Everyone still working is submitted now with the answers saved so far. New students can no longer enter. You cannot reopen it.</p>
+                <p>New students can no longer enter. Anyone already working keeps their own timer and can finish. You cannot reopen the quiz.</p>
               </>
             )}
             {err && <p className="error" role="alert" style={{ marginTop: 12 }}>{err}</p>}

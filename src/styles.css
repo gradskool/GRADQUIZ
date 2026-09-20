@@ -219,3 +219,29 @@ section.block > h2 { margin-bottom: 16px; }
 .kinds button[aria-checked='true'] { background: var(--ink); color: var(--paper); }
 .accepted { margin-top: 8px; }
 .accepted b { font-family: var(--serif); }
+
+/* ---------- answer review ---------- */
+.rv { padding: 28px 0; border-top: 1px solid var(--rule); }
+.rv:first-child { border-top: 0; }
+.verdict { margin-left: 14px; font-weight: 700; }
+.verdict.right { color: var(--ok); }
+.verdict.wrong { color: var(--coral-ink); }
+.verdict.skipped { color: var(--muted); }
+.rvopts { list-style: none; margin: 18px 0 0; padding: 0; border-top: 1px solid var(--rule); }
+.rvopts li { display: flex; gap: 14px; align-items: baseline; padding: 12px; border-bottom: 1px solid var(--rule); }
+.rvopts li.is-correct { background: #e9f6ee; }
+.rvopts li.is-wrong { background: var(--coral-wash); }
+.rvopts .letter { font-family: var(--serif); width: 1.3em; flex: none; }
+.rvopts .text { white-space: pre-wrap; }
+.rvopts .tags { margin-left: auto; display: flex; gap: 12px; flex-wrap: wrap; justify-content: flex-end; }
+.tag { font-size: 0.85rem; font-weight: 700; white-space: nowrap; }
+.tag.ok { color: var(--ok); }
+.tag.no { color: var(--coral-ink); }
+.rvtyped { margin-top: 18px; }
+.rvtyped p + p { margin-top: 6px; }
+.rvtyped .k { color: var(--muted); }
+.rvtyped b { font-family: var(--serif); font-size: 1.25rem; }
+.okc { color: var(--ok); }
+.noc { color: var(--coral-ink); }
+.expl { margin-top: 18px; padding: 14px 16px; border-left: 4px solid var(--ink); background: #f6f6f6; }
+.expl p { margin-top: 4px; white-space: pre-wrap; }

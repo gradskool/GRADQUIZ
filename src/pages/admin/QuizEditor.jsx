@@ -17,6 +17,8 @@ export default function QuizEditor() {
   const [saving, setSaving] = useState(false)
   const [editing, setEditing] = useState(null) // a question id, 'new' or null
   const [bulk, setBulk] = useState(false)
+  const [expId, setExpId] = useState(null)
+  const [expText, setExpText] = useState('')
 
   const load = useCallback(async () => {
     try {
@@ -33,6 +35,7 @@ export default function QuizEditor() {
         wrong: String(q.marks_wrong),
         wrongTita: String(q.marks_wrong_tita),
         show: q.show_score,
+        review: q.show_review,
       })
     } catch (e) {
       setErr(e.message)
@@ -45,6 +48,19 @@ export default function QuizEditor() {
   if (!quiz || !form) return <main className="page"><p className="muted">Loading.</p></main>
 
   const draft = quiz.status === 'draft'
+  // True when the form holds edits that are not saved yet. Starting a quiz then would lock the old saved values.
+  const dirty =
+    form.title.trim() !== quiz.title ||
+    form.instructions.trim() !== (quiz.instructions || '') ||
+    form.show !== quiz.show_score ||
+    form.review !== quiz.show_review ||
+    (draft && (
+      form.code !== quiz.code ||
+      Number(form.duration) !== quiz.duration_minutes ||
+      Number(form.correct) !== Number(quiz.marks_correct) ||
+      Number(form.wrong) !== Number(quiz.marks_wrong) ||
+      Number(form.wrongTita) !== Number(quiz.marks_wrong_tita)
+    ))
   const set = (k) => (e) => setForm({ ...form, [k]: e.target.type === 'checkbox' ? e.target.checked : e.target.value })
 
   async function saveSettings(e) {
@@ -54,6 +70,7 @@ export default function QuizEditor() {
       title: form.title.trim() || 'Untitled quiz',
       instructions: form.instructions.trim() || null,
       show_score: form.show,
+      show_review: form.review,
     }
     if (draft) {
       const code = form.code.trim().toUpperCase()
@@ -89,6 +106,14 @@ export default function QuizEditor() {
     check(await supabase.from('questions').update(row).eq('id', qid))
     toast('Question saved')
     await load()
+  }
+  async function saveExplanation(qid) {
+    try {
+      check(await supabase.from('questions').update({ explanation: expText.trim() || null }).eq('id', qid))
+      setExpId(null)
+      toast('Explanation saved')
+      await load()
+    } catch (ex) { setErr(ex.message) }
   }
   async function removeQuestion(qid) {
     if (!window.confirm('Delete this question?')) return
@@ -127,7 +152,7 @@ export default function QuizEditor() {
           </p>
         </div>
         <div className="stack" style={{ textAlign: 'right' }}>
-          <QuizControls quiz={quiz} questionCount={qs.length} onChange={load} />
+          <QuizControls quiz={quiz} questionCount={qs.length} onChange={load} blocked={dirty ? 'Save your settings first.' : ''} />
           <Link to={`/admin/quiz/${id}/results`} className="btn ghost small">View results</Link>
         </div>
       </div>
@@ -192,7 +217,14 @@ export default function QuizEditor() {
             <input type="checkbox" checked={form.show} onChange={set('show')} />
             <span>Show students their score after they submit. Turn this off to release scores later.</span>
           </label>
-          <div><button className="btn" disabled={saving}>{saving ? 'Saving' : 'Save settings'}</button></div>
+          <label className="check">
+            <input type="checkbox" checked={form.review} onChange={set('review')} />
+            <span>Let students review their answers once the quiz has ended and every student has finished. They see their answer, the correct answer and your explanation for every question.</span>
+          </label>
+          <div className="row">
+            <button className="btn" disabled={saving}>{saving ? 'Saving' : 'Save settings'}</button>
+            {dirty && <span className="error" role="status">You have unsaved changes.</span>}
+          </div>
         </form>
       </section>
 
@@ -206,7 +238,7 @@ export default function QuizEditor() {
             </div>
           )}
         </div>
-        {!draft && <p className="muted" style={{ marginTop: 8 }}>Questions are locked.</p>}
+        {!draft && <p className="muted" style={{ marginTop: 8 }}>Questions are locked. You can still add or change explanations.</p>}
 
         {draft && editing === 'new' && (
           <QuestionForm
@@ -245,7 +277,26 @@ export default function QuizEditor() {
                       ))}
                     </ol>
                   )}
+                  {expId === q.id ? (
+                    <div className="stack" style={{ marginTop: 12 }}>
+                      <label className="field">
+                        <span>Explanation</span>
+                        <textarea className="textarea" value={expText} onChange={(e) => setExpText(e.target.value)} autoFocus />
+                      </label>
+                      <div className="row">
+                        <button className="btn small" onClick={() => saveExplanation(q.id)}>Save explanation</button>
+                        <button className="btn ghost small" onClick={() => setExpId(null)}>Cancel</button>
+                      </div>
+                    </div>
+                  ) : (
+                    q.explanation && <p className="muted small" style={{ marginTop: 10, whiteSpace: 'pre-wrap' }}>Explanation. {q.explanation}</p>
+                  )}
                 </div>
+                {!draft && expId !== q.id && (
+                  <div className="qactions">
+                    <button className="link" onClick={() => { setExpText(q.explanation || ''); setExpId(q.id) }}>{q.explanation ? 'Edit explanation' : 'Add explanation'}</button>
+                  </div>
+                )}
                 {draft && (
                   <div className="qactions">
                     <button className="link" onClick={() => move(i, -1)} disabled={i === 0} aria-label="Move up">Up</button>
@@ -276,6 +327,7 @@ function QuestionForm({ initial, onSave, onCancel }) {
   const [opts, setOpts] = useState(initial?.kind !== 'tita' && initial?.options?.length ? [...initial.options] : ['', '', '', ''])
   const [correct, setCorrect] = useState(initial?.correct_index ?? 0)
   const [accepted, setAccepted] = useState(initial?.kind === 'tita' ? initial.accepted.join('\n') : '')
+  const [expl, setExpl] = useState(initial?.explanation || '')
   const [err, setErr] = useState('')
   const [busy, setBusy] = useState(false)
 
@@ -296,13 +348,13 @@ function QuestionForm({ initial, onSave, onCancel }) {
       if (list.length === 0) return setErr('Add the accepted answer.')
       if (list.length > 10) return setErr('Use at most 10 accepted answers.')
       if (list.some((x) => x.length > 40)) return setErr('Each accepted answer can be up to 40 characters.')
-      row = { kind: 'tita', body: b, options: [], correct_index: null, accepted: list }
+      row = { kind: 'tita', body: b, options: [], correct_index: null, accepted: list, explanation: expl.trim() || null }
     } else {
       const items = opts.map((t, i) => ({ t: t.trim(), c: i === correct })).filter((x) => x.t)
       if (items.length < 2) return setErr('Add at least two options.')
       const ci = items.findIndex((x) => x.c)
       if (ci < 0) return setErr('Mark the correct option. It cannot be empty.')
-      row = { kind: 'mcq', body: b, options: items.map((x) => x.t), correct_index: ci, accepted: null }
+      row = { kind: 'mcq', body: b, options: items.map((x) => x.t), correct_index: ci, accepted: null, explanation: expl.trim() || null }
     }
     setBusy(true)
     try {
@@ -345,6 +397,11 @@ function QuestionForm({ initial, onSave, onCancel }) {
           {opts.length < 6 && <p style={{ marginTop: 10 }}><button type="button" className="link" onClick={() => setOpts([...opts, ''])}>Add option</button></p>}
         </fieldset>
       )}
+      <label className="field">
+        <span>Explanation (optional)</span>
+        <textarea className="textarea" style={{ minHeight: 72 }} value={expl} onChange={(e) => setExpl(e.target.value)} />
+        <small>Students see this in the answer review after the quiz ends.</small>
+      </label>
       {err && <p className="error" role="alert">{err}</p>}
       <div className="row">
         <button className="btn small" disabled={busy}>{busy ? 'Saving' : 'Save question'}</button>
@@ -369,7 +426,8 @@ D) 72
 Ans: C
 
 Q3. What is 6 x 7?
-Ans: 42`
+Ans: 42
+Exp: Six sevens make forty two.`
 
 function BulkImport({ onAdd, onCancel }) {
   const [text, setText] = useState('')
@@ -393,7 +451,7 @@ function BulkImport({ onAdd, onCancel }) {
       <label className="field">
         <span>Paste questions</span>
         <textarea className="textarea" style={{ minHeight: 220 }} value={text} onChange={(e) => setText(e.target.value)} placeholder={SAMPLE} autoFocus />
-        <small>One block per question. Multiple choice needs lettered options and an Ans line with the letter. A type-in question has no options, just Ans with the value. Put alternatives on one line with a bar, like Ans: 3.5 | 7/2.</small>
+        <small>One block per question. Multiple choice needs lettered options and an Ans line with the letter. A type-in question has no options, just Ans with the value. Put alternatives on one line with a bar, like Ans: 3.5 | 7/2. Add an optional Exp line after Ans for the explanation.</small>
       </label>
       {text.trim() && (
         <div>

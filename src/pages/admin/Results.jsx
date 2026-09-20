@@ -1,7 +1,8 @@
 import { Fragment, useCallback, useEffect, useMemo, useState } from 'react'
 import { Link, useParams } from 'react-router-dom'
 import { check, supabase } from '../../lib/supabase.js'
-import { LETTERS, downloadCsv, formatWhen, num, spoken } from '../../lib/util.js'
+import { LETTERS, copyText, downloadCsv, formatWhen, num, spoken } from '../../lib/util.js'
+import { useToast } from '../../components/Toast.jsx'
 import QuizControls from '../../components/QuizControls.jsx'
 
 const keyText = (q) => (q.kind === 'tita' ? q.accepted.join(' or ') : LETTERS[q.correct_index])
@@ -9,6 +10,7 @@ const givenText = (q, a) => (a == null ? '' : q.kind === 'tita' ? String(a) : LE
 
 export default function Results() {
   const { id } = useParams()
+  const toast = useToast()
   const [quiz, setQuiz] = useState(null)
   const [qs, setQs] = useState([])
   const [rows, setRows] = useState([])
@@ -22,7 +24,7 @@ export default function Results() {
       await supabase.rpc('finalize_expired', { p_quiz: id })
       const q = check(await supabase.from('quizzes').select('*').eq('id', id).single())
       const questions = check(await supabase.from('questions').select('id, position, kind, body, options, correct_index, accepted').eq('quiz_id', id).order('position'))
-      const attempts = check(await supabase.from('attempts').select('id, name, email, status, submit_reason, started_at, submitted_at, answers, graded, correct, wrong, unattempted, score, time_taken_seconds').eq('quiz_id', id))
+      const attempts = check(await supabase.from('attempts').select('id, token, name, email, status, submit_reason, started_at, submitted_at, answers, graded, correct, wrong, unattempted, score, time_taken_seconds').eq('quiz_id', id))
       setQuiz(q)
       setQs(questions)
       setRows(attempts)
@@ -34,11 +36,22 @@ export default function Results() {
   }, [id])
 
   useEffect(() => { load() }, [load])
+  const stillWorking = rows.some((r) => r.status === 'in_progress')
   useEffect(() => {
-    if (quiz?.status !== 'live') return
+    if (quiz?.status !== 'live' && !stillWorking) return
     const t = setInterval(load, 10000)
     return () => clearInterval(t)
-  }, [quiz?.status, load])
+  }, [quiz?.status, stillWorking, load])
+
+  async function submitAll(n) {
+    if (!window.confirm(`Submit the ${n} ${n === 1 ? 'student' : 'students'} still working right now? Their saved answers are scored.`)) return
+    try {
+      check(await supabase.rpc('submit_all_in_progress', { p_quiz: id }))
+      await load()
+    } catch (e) {
+      setErr(e.message)
+    }
+  }
 
   const submitted = rows.filter((r) => r.status === 'submitted')
   const total = quiz ? qs.length * Number(quiz.marks_correct) : 0
@@ -92,14 +105,16 @@ export default function Results() {
   const arrow = (key) => (sort.key === key ? (sort.dir === 'desc' ? ' ↓' : ' ↑') : '')
   const toggle = (rid) => setOpen((s) => { const n = new Set(s); n.has(rid) ? n.delete(rid) : n.add(rid); return n })
 
+  const linkFor = (r) => `${window.location.origin}/q/${quiz.code}?a=${r.id}&t=${r.token}`
+
   function exportCsv() {
-    const head = ['Name', 'Email', 'Status', 'Score', 'Correct', 'Wrong', 'Unattempted', 'Time taken (seconds)', 'Submitted at', 'How it ended', ...qs.map((_, i) => `Q${i + 1}`)]
+    const head = ['Name', 'Email', 'Status', 'Score', 'Correct', 'Wrong', 'Unattempted', 'Time taken (seconds)', 'Submitted at', 'How it ended', 'Result link', ...qs.map((_, i) => `Q${i + 1}`)]
     const body = sorted.map((r) => [
       r.name, r.email, r.status, r.score ?? '', r.correct ?? '', r.wrong ?? '', r.unattempted ?? '',
-      r.time_taken_seconds ?? '', r.submitted_at ?? '', r.submit_reason ?? '',
+      r.time_taken_seconds ?? '', r.submitted_at ?? '', r.submit_reason ?? '', linkFor(r),
       ...qs.map((q) => givenText(q, r.answers?.[q.id])),
     ])
-    const key = ['Answer key', '', '', '', '', '', '', '', '', '', ...qs.map((q) => keyText(q))]
+    const key = ['Answer key', '', '', '', '', '', '', '', '', '', '', ...qs.map((q) => keyText(q))]
     downloadCsv(`${quiz.code}-results.csv`, [head, key, ...body])
   }
 
@@ -124,9 +139,18 @@ export default function Results() {
         </div>
       </div>
       {err && <p className="error" role="alert" style={{ marginTop: 12 }}>{err}</p>}
-      {quiz.status === 'live' && stamp && <p className="muted small" style={{ marginTop: 12 }}>Updates every 10 seconds.</p>}
+      {(quiz.status === 'live' || stillWorking) && stamp && <p className="muted small" style={{ marginTop: 12 }}>Updates every 10 seconds.</p>}
 
       <div className="spacer" />
+      {quiz.status !== 'draft' && inProgress > 0 && (
+        <div className="notice row between" style={{ marginBottom: 24 }}>
+          <span>
+            <b>{inProgress}</b> {inProgress === 1 ? 'student is' : 'students are'} still working.
+            {quiz.status === 'ended' ? ' They keep their own timers and can finish.' : ''}
+          </span>
+          <button className="btn ghost small" onClick={() => submitAll(inProgress)}>Submit everyone still working</button>
+        </div>
+      )}
       <div className="stats">
         <div><b>{rows.length}</b><span className="muted">joined</span></div>
         <div><b>{submitted.length}</b><span className="muted">submitted</span></div>
@@ -171,9 +195,14 @@ export default function Results() {
                         {r.status === 'in_progress' ? 'In progress'
                           : r.submit_reason === 'manual' ? 'Submitted'
                           : r.submit_reason === 'time' ? 'Time ran out'
-                          : 'Ended by you'}
+                          : 'Submitted by you'}
                       </td>
-                      <td><button className="link" onClick={() => toggle(r.id)} aria-expanded={open.has(r.id)}>{open.has(r.id) ? 'Hide' : 'Answers'}</button></td>
+                      <td>
+                        <div className="row" style={{ gap: 16, flexWrap: 'nowrap' }}>
+                          <button className="link" onClick={() => toggle(r.id)} aria-expanded={open.has(r.id)}>{open.has(r.id) ? 'Hide' : 'Answers'}</button>
+                          <button className="link" onClick={async () => { await copyText(linkFor(r)); toast('Link copied') }}>Copy link</button>
+                        </div>
+                      </td>
                     </tr>
                     {open.has(r.id) && (
                       <tr>
