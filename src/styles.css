@@ -307,3 +307,10 @@ section.block > h2 { margin-bottom: 16px; }
 .trend-col:hover .trend-track i { opacity: 0.8; }
 .trend-val { min-height: 1.5em; line-height: 1.5; }
 .trend-col:last-child .trend-track i { background: var(--coral); }
+
+/* maths */
+.mathblock { display: block; margin: 10px 0; overflow-x: auto; overflow-y: hidden; }
+.mathinline .katex { font-size: 1.05em; }
+.opt .mathinline .katex, .rvopts .mathinline .katex, .mathpreview .katex { font-size: 1.2em; }
+.mathpreview { padding: 14px 16px; border-left: 4px solid var(--rule-strong); background: #fafafa; }
+.mathpreview > * + * { margin-top: 6px; }

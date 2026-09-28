@@ -5,6 +5,7 @@ import { LETTERS, copyText, quizLink } from '../../lib/util.js'
 import { parseQuestions } from '../../lib/parse.js'
 import { useToast } from '../../components/Toast.jsx'
 import QuizControls from '../../components/QuizControls.jsx'
+import MathText, { hasMath } from '../../components/MathText.jsx'
 
 // <input type="datetime-local"> works in local time without seconds.
 const toLocalInput = (iso) => {
@@ -52,6 +53,7 @@ export default function QuizEditor() {
         review: q.show_review,
         access: q.access || 'open',
         board: Boolean(q.show_leaderboard),
+        practice: Boolean(q.allow_practice),
         shufQ: Boolean(q.shuffle_questions),
         shufO: Boolean(q.shuffle_options),
         startsAt: toLocalInput(q.starts_at),
@@ -83,6 +85,7 @@ export default function QuizEditor() {
     form.review !== quiz.show_review ||
     form.access !== (quiz.access || 'open') ||
     form.board !== Boolean(quiz.show_leaderboard) ||
+    form.practice !== Boolean(quiz.allow_practice) ||
     (quiz.status !== 'ended' && form.endsAt !== toLocalInput(quiz.ends_at)) ||
     (draft && (
       form.shufQ !== Boolean(quiz.shuffle_questions) ||
@@ -106,6 +109,7 @@ export default function QuizEditor() {
       show_review: form.review,
       access: form.access,
       show_leaderboard: form.board,
+      allow_practice: form.practice,
     }
     if (quiz.status !== 'ended') patch.ends_at = fromLocalInput(form.endsAt)
     if (draft) {
@@ -281,7 +285,11 @@ export default function QuizEditor() {
           </label>
           <label className="check">
             <input type="checkbox" checked={form.board} onChange={set('board')} disabled={!form.show} />
-            <span>Show the top 10 by name on the result page. Needs the score to be shown. Every student always sees their own rank and percentile when scores are shown.</span>
+            <span>Show the top 3 by name on the result page. Needs the score to be shown. Every student always sees their own rank and percentile when scores are shown.</span>
+          </label>
+          <label className="check">
+            <input type="checkbox" checked={form.practice} onChange={set('practice')} />
+            <span>Let students practise again after they submit, untimed and not scored. Their first score and rank never change. Once an open quiz has ended, anyone with the code can practise it. Practice shows the answers.</span>
           </label>
           <label className="check">
             <input type="checkbox" checked={form.shufQ} onChange={set('shufQ')} disabled={!draft} />
@@ -360,13 +368,13 @@ export default function QuizEditor() {
                 <span className="no">{i + 1}</span>
                 <div>
                   {q.bonus && <p className="chip" style={{ marginLeft: 0, marginBottom: 6 }}>Bonus, full marks to everyone</p>}
-                  <p style={{ whiteSpace: 'pre-wrap' }}>{q.body}</p>
+                  <MathText as="p" style={{ whiteSpace: 'pre-wrap' }} text={q.body} />
                   {q.kind === 'tita' ? (
                     <p className="accepted"><span className="muted">Type-in. Accepted </span><b>{q.accepted.join('  or  ')}</b></p>
                   ) : (
                     <ol>
                       {q.options.map((o, k) => (
-                        <li key={k} className={k === q.correct_index ? 'right' : ''}><b>{LETTERS[k]}</b><span>{o}</span></li>
+                        <li key={k} className={k === q.correct_index ? 'right' : ''}><b>{LETTERS[k]}</b><MathText text={o} /></li>
                       ))}
                     </ol>
                   )}
@@ -394,7 +402,7 @@ export default function QuizEditor() {
                       </div>
                     </div>
                   ) : (
-                    q.explanation && <p className="muted small" style={{ marginTop: 10, whiteSpace: 'pre-wrap' }}>Explanation. {q.explanation}</p>
+                    q.explanation && <MathText as="p" className="muted small" style={{ marginTop: 10, whiteSpace: 'pre-wrap' }} text={`Explanation. ${q.explanation}`} />
                   )}
                 </div>
                 {!draft && expId !== q.id && keyId !== q.id && (
@@ -468,7 +476,7 @@ function KeyForm({ q, onSave, onCancel }) {
           {q.options.map((o, i) => (
             <label key={i} className="check" style={{ marginTop: 6 }}>
               <input type="radio" name={`key-${q.id}`} checked={correct === i} onChange={() => setCorrect(i)} />
-              <span><b>{LETTERS[i]}</b> {o}</span>
+              <span><b>{LETTERS[i]}</b> <MathText text={o} /></span>
             </label>
           ))}
         </fieldset>
@@ -579,6 +587,8 @@ function InviteList({ quizId, invites, onChange, live }) {
   )
 }
 
+const MATH_HELP = 'Maths: put it between $ signs, like $\\frac{3}{4}$, $x^2$, $\\sqrt{5}$, $a_n$, $\\pi r^2$, $\\le$, $\\ge$. Use $$ ... $$ for a line of its own. Plain money like $5 stays as text.'
+
 // Text answers match without regard to capitals, so drop repeats that differ only by case.
 const uniqueCI = (list) => { const seen = new Set(); return list.filter((x) => { const k = x.toLowerCase(); if (seen.has(k)) return false; seen.add(k); return true }) }
 
@@ -635,7 +645,15 @@ function QuestionForm({ initial, onSave, onCancel }) {
       <label className="field">
         <span>Question</span>
         <textarea className="textarea" value={body} onChange={(e) => setBody(e.target.value)} autoFocus />
+        <small>{MATH_HELP}</small>
       </label>
+      {(hasMath(body) || opts.some(hasMath)) && (
+        <div className="mathpreview">
+          <p className="muted small">Preview</p>
+          <MathText as="p" style={{ whiteSpace: 'pre-wrap' }} text={body} />
+          {kind === 'mcq' && opts.filter((o) => o.trim()).map((o, i) => <p key={i}><b>{LETTERS[i]}</b> <MathText text={o} /></p>)}
+        </div>
+      )}
       {kind === 'tita' ? (
         <label className="field">
           <span>Accepted answers</span>
@@ -712,7 +730,7 @@ function BulkImport({ onAdd, onCancel }) {
       <label className="field">
         <span>Paste questions</span>
         <textarea className="textarea" style={{ minHeight: 220 }} value={text} onChange={(e) => setText(e.target.value)} placeholder={SAMPLE} autoFocus />
-        <small>One block per question. Multiple choice needs lettered options and an Ans line with the letter. A type-in question has no options, just Ans with the value. Put alternatives on one line with a bar, like Ans: 3.5 | 7/2. A one-letter type-in answer goes in quotes, like Ans: "C". Write lettered statements as (i), (ii) so they are not read as options. Add an optional Exp line after Ans for the explanation.</small>
+        <small>One block per question. Multiple choice needs lettered options and an Ans line with the letter. A type-in question has no options, just Ans with the value. Put alternatives on one line with a bar, like Ans: 3.5 | 7/2. A one-letter type-in answer goes in quotes, like Ans: "C". Write lettered statements as (i), (ii) so they are not read as options. Add an optional Exp line after Ans for the explanation. {MATH_HELP}</small>
       </label>
       {text.trim() && (
         <div>

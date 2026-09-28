@@ -14,6 +14,15 @@ export default function StudentHistory() {
     rpc('admin_student_history', { p_email: email }).then(setRows).catch((e) => setErr(e.message))
   }, [email])
 
+  async function report(attemptId) {
+    try {
+      const [d, { buildReport }] = await Promise.all([rpc('admin_report', { p_attempt: attemptId }), import('../../lib/report.js')])
+      buildReport(d, { admin: true })
+    } catch (e) {
+      setErr(e.message)
+    }
+  }
+
   const done = (rows || []).filter((r) => r.percentile != null)
   const avgPct = done.length ? done.reduce((a, r) => a + Number(r.percentile), 0) / done.length : null
   const avgAcc = done.length
@@ -65,7 +74,7 @@ export default function StudentHistory() {
                   <tr>
                     <th>Quiz</th><th>Date</th><th className="n">Score</th><th className="n">Rank</th>
                     <th>Percentile</th><th className="n">Right</th><th className="n">Wrong</th><th className="n">Skipped</th>
-                    <th className="n">Time</th><th className="n">Tabs</th>
+                    <th className="n">Time</th><th className="n">Tabs</th><th />
                   </tr>
                 </thead>
                 <tbody>
@@ -87,6 +96,7 @@ export default function StudentHistory() {
                         <td colSpan={7} className="muted">In progress</td>
                       )}
                       <td className="n">{r.tab_switches || 0}</td>
+                      <td>{r.status === 'submitted' && <button className="link" onClick={() => report(r.attempt_id)}>Report</button>}</td>
                     </tr>
                   ))}
                 </tbody>

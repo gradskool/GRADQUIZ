@@ -13,7 +13,7 @@ const MESSAGES = {
   QUIZ_NOT_FOUND: 'No quiz matches that code. Check it and try again.',
   QUIZ_NOT_STARTED: 'This quiz has not started yet.',
   QUIZ_ENDED: 'This quiz has ended.',
-  ALREADY_ATTEMPTED: 'This email has already been used for this quiz. If you attempted it, use Find your result with your email and PIN, or open your personal link. If you lost both, ask your instructor.',
+  ALREADY_ATTEMPTED: 'This email has already been used for this quiz. If you attempted it, use Find your result with your email and PIN. If you forgot your PIN, ask your instructor.',
   INVALID_ATTEMPT: 'Your attempt could not be found.',
   NOT_ADMIN: 'This account is not an admin.',
   NO_QUESTIONS: 'Add at least one question first.',
@@ -29,6 +29,9 @@ const MESSAGES = {
   SEND_FAILED: 'The email could not be sent. Try again in a minute, or tell your instructor.',
   NOT_SET_UP: 'Email codes are not set up yet. Tell your instructor.',
   SERVER: 'Something went wrong on our side. Try again.',
+  PRACTICE_OFF: 'Practice is not open for this quiz.',
+  PRACTICE_NOT_OPEN: 'Practice opens after you submit, or for everyone once the quiz has ended.',
+  REPORT_NOT_AVAILABLE: 'The report is available once scores are shown.',
 }
 
 export class AppError extends Error {

@@ -92,6 +92,15 @@ A normal Gmail account sends about 500 emails a day. `npm run dev` does not run 
 
 Run `supabase/patch_round3.sql` before deploying these pages.
 
+## Round 4 features
+
+- **Top 3.** The leaderboard shows the top 3 by name.
+- **Maths.** Write maths between $ signs in questions, options and explanations: `$\frac{3}{4}$`, `$x^2$`, `$\sqrt{5}$`. Use `$$ ... $$` for a line of its own. Money like $5 and $10 stays plain text. Write `\$` for a literal dollar sign. The question form shows a live preview.
+- **Practice.** Tick "Let students practise again". After submitting, a student can practise untimed, and the score is never saved, so their first score and rank stay. Once an open quiz has ended, anyone with the code can practise it. Invited only quizzes need the student's own attempt.
+- **PDF report.** Students press Download report on their result (needs the score to be shown; answers appear only when review is open). Admins press Report next to any submitted student in Results or on the Students page.
+
+Run `supabase/patch_round4.sql` before deploying these pages.
+
 ## Paste format for many questions
 
 ```

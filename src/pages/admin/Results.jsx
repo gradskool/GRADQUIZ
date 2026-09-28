@@ -1,6 +1,6 @@
 import { Fragment, useCallback, useEffect, useMemo, useState } from 'react'
 import { Link, useParams } from 'react-router-dom'
-import { check, supabase } from '../../lib/supabase.js'
+import { check, rpc, supabase } from '../../lib/supabase.js'
 import { LETTERS, copyText, downloadCsv, formatWhen, num, spoken } from '../../lib/util.js'
 import { useToast } from '../../components/Toast.jsx'
 import QuizControls from '../../components/QuizControls.jsx'
@@ -45,6 +45,15 @@ export default function Results() {
     const t = setInterval(load, 10000)
     return () => clearInterval(t)
   }, [quiz?.status, stillWorking, load])
+
+  async function adminReport(attemptId) {
+    try {
+      const [d, { buildReport }] = await Promise.all([rpc('admin_report', { p_attempt: attemptId }), import('../../lib/report.js')])
+      buildReport(d, { admin: true })
+    } catch (e) {
+      setErr(e.message)
+    }
+  }
 
   async function submitAll(n) {
     if (!window.confirm(`Submit the ${n} ${n === 1 ? 'student' : 'students'} still working right now? Their saved answers are scored.`)) return
@@ -232,6 +241,7 @@ export default function Results() {
                       <td>
                         <div className="row" style={{ gap: 16, flexWrap: 'nowrap' }}>
                           <button className="link" onClick={() => toggle(r.id)} aria-expanded={open.has(r.id)}>{open.has(r.id) ? 'Hide' : 'Answers'}</button>
+                          {r.status === 'submitted' && <button className="link" onClick={() => adminReport(r.id)}>Report</button>}
                           <button className="link" onClick={async () => {
                             await copyText(linkFor(r))
                             toast('Link copied')

@@ -1,8 +1,9 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useParams, useSearchParams } from 'react-router-dom'
 import Brand from '../components/Brand.jsx'
+import MathText from '../components/MathText.jsx'
 import { rpc, sendQuizCode, toAppError } from '../lib/supabase.js'
-import { LETTERS, clock, copyText, formatWhen, num, spoken } from '../lib/util.js'
+import { LETTERS, clock, formatWhen, num, spoken } from '../lib/util.js'
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 const isAnswered = (v) => v != null && String(v).trim() !== ''
@@ -87,7 +88,7 @@ export default function StudentQuiz() {
 
   async function savePin(pin) {
     const saved = loadSaved(code)
-    if (!saved) throw new Error('This device has no saved attempt. Open your personal link first.')
+    if (!saved) throw new Error('This device has no saved attempt. Use Find your result with your email and PIN first.')
     setResult(await rpc('set_my_pin', { p_attempt: saved.attemptId, p_token: saved.token, p_pin: pin }))
   }
 
@@ -113,12 +114,41 @@ export default function StudentQuiz() {
     }
   }
 
+  // Practice: from the result page it uses this device's attempt, from the lobby of an ended open quiz it needs none.
+  const [practiceFrom, setPracticeFrom] = useState(null)
+  function openPractice(from) {
+    setPracticeFrom(from)
+    setPhase('practice')
+    window.scrollTo(0, 0)
+  }
+
+  async function downloadReport() {
+    const saved = loadSaved(code)
+    if (!saved) throw new Error('This device has no saved attempt. Use Find your result with your email and PIN first.')
+    const [d, { buildReport }] = await Promise.all([
+      rpc('get_report', { p_attempt: saved.attemptId, p_token: saved.token }),
+      import('../lib/report.js'),
+    ])
+    buildReport(d)
+  }
+
   // The rank and leaderboard move as classmates submit, so refresh them quietly.
   useEffect(() => {
     if (phase !== 'result' || !result?.show_score) return
     const t = setInterval(checkAgain, 30000)
     return () => clearInterval(t)
   }, [phase, result?.show_score]) // eslint-disable-line react-hooks/exhaustive-deps
+
+  if (phase === 'practice') {
+    return (
+      <Practice
+        code={code}
+        creds={practiceFrom === 'result' ? loadSaved(code) : null}
+        backLabel={practiceFrom === 'result' ? 'Back to your result' : 'Back to the quiz page'}
+        onExit={() => { setPhase(practiceFrom === 'result' ? 'result' : 'lobby'); window.scrollTo(0, 0) }}
+      />
+    )
+  }
 
   if (phase === 'exam') {
     return (
@@ -151,8 +181,8 @@ export default function StudentQuiz() {
           </div>
         )}
         {phase === 'lobby' && notice && <div className="notice" role="alert" style={{ marginBottom: 24 }}>{notice}</div>}
-        {phase === 'lobby' && <Lobby code={code} info={info} setInfo={setInfo} onStarted={started} onFound={found} />}
-        {phase === 'result' && <Result res={result} onCheck={checkAgain} onReview={openReview} reviewErr={reviewErr} link={personalLink(code)} onSetPin={savePin} />}
+        {phase === 'lobby' && <Lobby code={code} info={info} setInfo={setInfo} onStarted={started} onFound={found} onPractice={() => openPractice('lobby')} />}
+        {phase === 'result' && <Result res={result} onCheck={checkAgain} onReview={openReview} reviewErr={reviewErr} onSetPin={savePin} onPractice={() => openPractice('result')} onReport={downloadReport} />}
         {phase === 'review' && <Review data={review} onBack={() => setPhase('result')} />}
       </main>
     </>
@@ -161,7 +191,7 @@ export default function StudentQuiz() {
 
 /* ------------------------------------------------------------------ */
 
-function Lobby({ code, info, setInfo, onStarted, onFound }) {
+function Lobby({ code, info, setInfo, onStarted, onFound, onPractice }) {
   const me = useMemo(loadMe, [])
   const [name, setName] = useState(me.name || '')
   const [email, setEmail] = useState(me.email || '')
@@ -230,7 +260,7 @@ function Lobby({ code, info, setInfo, onStarted, onFound }) {
     try {
       const res = await rpc('find_my_result', { p_code: code, p_email: fEmail, p_pin: fPin })
       if (res.ok) onFound(res)
-      else setFErr(res.locked ? 'Too many wrong tries. Try again in 15 minutes.' : 'That email and PIN do not match. If you did not choose a PIN, open your personal link instead.')
+      else setFErr(res.locked ? 'Too many wrong tries. Try again in 15 minutes.' : 'That email and PIN do not match. If you forgot your PIN, ask your instructor.')
     } catch (ex) {
       setFErr(ex.message)
     } finally {
@@ -321,7 +351,15 @@ function Lobby({ code, info, setInfo, onStarted, onFound }) {
         </div>
       )}
       {info.status === 'ended' && (
-        <div className="notice plain" role="status">This quiz has ended. You can no longer start it.</div>
+        <div className="stack">
+          <div className="notice plain" role="status">This quiz has ended. You can no longer start it.</div>
+          {info.practice && (
+            <div>
+              <button className="btn" onClick={onPractice}>Practise this quiz</button>
+              <p className="muted small" style={{ marginTop: 8 }}>Untimed and not scored. You see the answers and explanations when you check.</p>
+            </div>
+          )}
+        </div>
       )}
       {info.status === 'live' && (
         <form className="stack" onSubmit={start} noValidate style={{ marginTop: 32 }}>
@@ -650,7 +688,7 @@ function Exam({ init, creds, onDone }) {
             Question {idx + 1} of {qs.length}
             {marked && <span className="markflag">Marked for review</span>}
           </p>
-          <h2 className="qbody" style={{ fontWeight: 400 }}>{q.body}</h2>
+          <MathText as="h2" className="qbody" style={{ fontWeight: 400 }} text={q.body} />
           {q.kind === 'tita' ? (
             <div className="typein">
               <label className="sr" htmlFor={`ti-${q.id}`}>Your answer</label>
@@ -680,7 +718,7 @@ function Exam({ init, creds, onDone }) {
                   onClick={() => choose(orig)}
                 >
                   <span className="letter">{LETTERS[k]}</span>
-                  <span className="text">{q.options[orig]}</span>
+                  <MathText className="text" text={q.options[orig]} />
                 </button>
               ))}
             </div>
@@ -757,13 +795,14 @@ function Exam({ init, creds, onDone }) {
 
 /* ------------------------------------------------------------------ */
 
-function personalLink(code) {
-  const c = loadSaved(code)
-  return c ? `${window.location.origin}/q/${code}?a=${c.attemptId}&t=${c.token}` : ''
-}
-
-function Result({ res, onCheck, onReview, reviewErr, link, onSetPin }) {
-  const [copied, setCopied] = useState(false)
+function Result({ res, onCheck, onReview, reviewErr, onSetPin, onPractice, onReport }) {
+  const [repBusy, setRepBusy] = useState(false)
+  const [repErr, setRepErr] = useState('')
+  async function report() {
+    setRepBusy(true)
+    setRepErr('')
+    try { await onReport() } catch (e) { setRepErr(e.message) } finally { setRepBusy(false) }
+  }
   const reason = {
     time: 'Your time ran out, so your answers were submitted automatically.',
     ended: 'Your instructor ended the quiz, so your answers were submitted automatically.',
@@ -828,27 +867,23 @@ function Result({ res, onCheck, onReview, reviewErr, link, onSetPin }) {
       )}
       {reviewErr && <p className="error" role="alert">{reviewErr}</p>}
 
-      {link && (
-        <div className="stack" style={{ marginTop: 40, paddingTop: 28, borderTop: '1px solid var(--rule)' }}>
-          <h3>Come back later</h3>
-          <p className="muted small">
-            Save your personal link to see your result{res.review_on ? ' and answer review' : ''} from any phone or computer.
-            Anyone who has this link can see your result, so keep it private.
-            {res.has_pin && ' You can also open the quiz page and choose Find your result, then use your email and PIN.'}
-          </p>
-          <div className="row" style={{ flexWrap: 'nowrap' }}>
-            <input className="input" readOnly value={link} onFocus={(e) => e.target.select()} aria-label="Your personal link" />
-            <button
-              className="btn ghost small"
-              style={{ flex: 'none' }}
-              onClick={async () => { await copyText(link); setCopied(true); setTimeout(() => setCopied(false), 2000) }}
-            >
-              {copied ? 'Copied' : 'Copy link'}
-            </button>
-          </div>
-          <PinBox hasPin={res.has_pin} onSave={onSetPin} />
+      {(res.show_score || res.practice_available) && (
+        <div className="row" style={{ marginTop: 24 }}>
+          {res.show_score && <button className="btn ghost" onClick={report} disabled={repBusy}>{repBusy ? 'Making report' : 'Download report (PDF)'}</button>}
+          {res.practice_available && <button className="btn ghost" onClick={onPractice}>Practise again, not scored</button>}
         </div>
       )}
+      {repErr && <p className="error" role="alert">{repErr}</p>}
+
+      <div className="stack" style={{ marginTop: 40, paddingTop: 28, borderTop: '1px solid var(--rule)' }}>
+        <h3>Come back later</h3>
+        <p className="muted small">
+          {res.has_pin
+            ? `To see your result${res.review_on ? ' and answer review' : ''} again on any phone or computer, open this quiz page, choose Find your result, and enter your email and PIN.`
+            : 'You have no PIN yet. Set one below so you can find this result again on any phone or computer with your email and PIN.'}
+        </p>
+        <PinBox hasPin={res.has_pin} onSave={onSetPin} />
+      </div>
     </div>
   )
 }
@@ -881,7 +916,6 @@ function PinBox({ hasPin, onSave }) {
     return (
       <div>
         {done && <p className="okc" role="status" style={{ fontWeight: 700 }}>PIN saved. Use it with your email under Find your result.</p>}
-        {!hasPin && !done && <p className="muted small" style={{ marginBottom: 8 }}>You have no PIN yet. Set one to find this result with just your email.</p>}
         <button className="link" onClick={() => { setOpen(true); setDone(false) }}>{hasPin || done ? 'Change PIN' : 'Set a PIN'}</button>
       </div>
     )
@@ -904,7 +938,7 @@ function PinBox({ hasPin, onSave }) {
 
 /* ------------------------------------------------------------------ */
 
-function Review({ data, onBack }) {
+function Review({ data, onBack, heading = 'Review', backLabel = 'Back to result' }) {
   const [filter, setFilter] = useState('all')
   const items = data.items
   const kind = (it) => (it.ok === true ? 'right' : it.ok === false ? 'wrong' : 'skipped')
@@ -916,9 +950,9 @@ function Review({ data, onBack }) {
 
   return (
     <div>
-      <p><button className="link" onClick={onBack}>Back to result</button></p>
+      {onBack && <p><button className="link" onClick={onBack}>{backLabel}</button></p>}
       <div className="spacer" />
-      <h1>Review</h1>
+      <h1>{heading}</h1>
       <p className="muted" style={{ marginTop: 10 }}>{data.title}. {count('right')} correct, {count('wrong')} wrong, {count('skipped')} not attempted.</p>
       <div className="kinds" role="radiogroup" aria-label="Show" style={{ marginTop: 24 }}>
         {filters.map(([k, t]) => (
@@ -934,7 +968,7 @@ function Review({ data, onBack }) {
               Question {i + 1}
               <span className={`verdict ${kind(it)}`}>{it.bonus ? 'Bonus, full marks to everyone' : label[kind(it)]}</span>
             </p>
-            <h2 className="qbody" style={{ fontWeight: 400 }}>{it.body}</h2>
+            <MathText as="h2" className="qbody" style={{ fontWeight: 400 }} text={it.body} />
 
             {it.kind === 'mcq' ? (
               <ul className="rvopts">
@@ -944,7 +978,7 @@ function Review({ data, onBack }) {
                   return (
                     <li key={orig} className={isRight ? 'is-correct' : isYours ? 'is-wrong' : ''}>
                       <b className="letter">{LETTERS[k]}</b>
-                      <span className="text">{it.options[orig]}</span>
+                      <MathText className="text" text={it.options[orig]} />
                       <span className="tags">
                         {isYours && <span className={`tag ${isRight ? 'ok' : 'no'}`}>Your answer</span>}
                         {isRight && <span className="tag ok">Correct answer</span>}
@@ -962,17 +996,173 @@ function Review({ data, onBack }) {
 
             {(it.time != null || it.avg_time != null) && (
               <p className="rvtime muted small">
-                <span>Your time <b>{it.time != null ? spoken(it.time) : '-'}</b></span>
+                {it.time != null && <span>Your time <b>{spoken(it.time)}</b></span>}
                 {it.avg_time != null && <span>Class average <b>{spoken(it.avg_time)}</b></span>}
               </p>
             )}
 
             {it.explanation && (
-              <div className="expl"><b>Explanation</b><p>{it.explanation}</p></div>
+              <div className="expl"><b>Explanation</b><MathText as="p" text={it.explanation} /></div>
             )}
           </article>
         ))}
       </div>
     </div>
+  )
+}
+/* ------------------------------------------------------------------ */
+
+// Practice run. Nothing is saved on the server, the first attempt's score and rank never change.
+function Practice({ code, creds, backLabel, onExit }) {
+  const key = `gradquiz:practice:${code}`
+  const [data, setData] = useState(null)
+  const [err, setErr] = useState('')
+  const [answers, setAnswers] = useState(() => { try { return JSON.parse(localStorage.getItem(key)) || {} } catch { return {} } })
+  const [idx, setIdx] = useState(0)
+  const [result, setResult] = useState(null)
+  const [busy, setBusy] = useState(false)
+  const [startedAt, setStartedAt] = useState(() => Date.now())
+  const [now, setNow] = useState(() => Date.now())
+  const args = useMemo(() => (creds ? { p_attempt: creds.attemptId, p_token: creds.token } : {}), [creds])
+
+  useEffect(() => {
+    rpc('practice_questions', { p_code: code, ...args }).then(setData).catch((e) => setErr(e.message))
+  }, [code, args])
+  useEffect(() => { try { localStorage.setItem(key, JSON.stringify(answers)) } catch { /* private mode */ } }, [answers, key])
+  useEffect(() => {
+    if (result) return
+    const t = setInterval(() => setNow(Date.now()), 1000)
+    return () => clearInterval(t)
+  }, [result])
+
+  async function check() {
+    const qs = data.questions
+    const left = qs.filter((x) => !isAnswered(answers[x.id])).length
+    if (left > 0 && !window.confirm(`${left} not answered. Check your answers anyway?`)) return
+    setBusy(true)
+    setErr('')
+    try {
+      const r = await rpc('practice_check', { p_code: code, p_answers: answers, ...args })
+      setResult({ ...r, seconds: Math.round((Date.now() - startedAt) / 1000) })
+      window.scrollTo(0, 0)
+    } catch (e) {
+      setErr(e.message)
+    } finally {
+      setBusy(false)
+    }
+  }
+  function again() {
+    setAnswers({})
+    setResult(null)
+    setIdx(0)
+    setStartedAt(Date.now())
+    window.scrollTo(0, 0)
+  }
+
+  if (result) {
+    return (
+      <>
+        <header className="bar"><Brand /></header>
+        <main className="page narrow">
+          <p><button className="link" onClick={onExit}>{backLabel}</button></p>
+          <div className="spacer" />
+          <p className="qmeta">Practice, not scored</p>
+          <h1>{result.title}</h1>
+          <p className="score" aria-label={`Practice score ${num(result.score)} out of ${num(result.total_marks)}`}>
+            {num(result.score)}<small> / {num(result.total_marks)}</small>
+          </p>
+          <div className="tally">
+            <div><b>{result.correct}</b>correct</div>
+            <div><b>{result.wrong}</b>wrong</div>
+            <div><b>{result.unattempted}</b>unattempted</div>
+            <div><b>{spoken(result.seconds)}</b>time taken</div>
+          </div>
+          <div className="notice plain" style={{ marginTop: 24 }}>This practice score is not saved. Your first attempt's score and rank stay the same.</div>
+          <div className="row" style={{ marginTop: 20 }}>
+            <button className="btn" onClick={again}>Practise again</button>
+          </div>
+          <div className="spacer" />
+          <Review data={result} heading="Answers" />
+        </main>
+      </>
+    )
+  }
+
+  if (!data) {
+    return (
+      <>
+        <header className="bar"><Brand /></header>
+        <main className="page narrow stack">
+          {err ? <><p className="error" role="alert">{err}</p><div><button className="btn ghost" onClick={onExit}>{backLabel}</button></div></> : <p className="muted">Loading practice.</p>}
+        </main>
+      </>
+    )
+  }
+
+  const qs = data.questions
+  const q = qs[idx]
+  const set = (v) => setAnswers((a) => {
+    const n = { ...a }
+    if (v == null || (typeof v === 'string' && v.trim() === '')) delete n[q.id]
+    else n[q.id] = v
+    return n
+  })
+  const done = qs.filter((x) => isAnswered(answers[x.id])).length
+
+  return (
+    <>
+      <header className="exambar">
+        <span className="title">Practice · {data.title}</span>
+        <div className="row" style={{ gap: 18, flexWrap: 'nowrap' }}>
+          <span className="sync">Not scored</span>
+          <span className="timer" role="timer" aria-label="Time so far">{clock((now - startedAt) / 1000)}</span>
+        </div>
+      </header>
+      <div className="examgrid">
+        <main>
+          <p className="qmeta">Question {idx + 1} of {qs.length}</p>
+          <MathText as="h2" className="qbody" style={{ fontWeight: 400 }} text={q.body} />
+          {q.kind === 'tita' ? (
+            <div className="typein">
+              <label className="sr" htmlFor={`pt-${q.id}`}>Your answer</label>
+              <input key={q.id} id={`pt-${q.id}`} className="tita" value={answers[q.id] ?? ''} onChange={(e) => set(e.target.value)}
+                placeholder="Type your answer" maxLength={40} autoComplete="off" autoCapitalize="off" autoCorrect="off" spellCheck="false" />
+            </div>
+          ) : (
+            <div className="opts" role="radiogroup" aria-label="Answer options">
+              {q.options.map((o, k) => (
+                <button key={k} className="opt" role="radio" aria-checked={answers[q.id] === k} onClick={() => set(k)}>
+                  <span className="letter">{LETTERS[k]}</span>
+                  <MathText className="text" text={o} />
+                </button>
+              ))}
+            </div>
+          )}
+          <div className="qnav">
+            <button className="btn ghost" onClick={() => setIdx(idx - 1)} disabled={idx === 0}>Previous</button>
+            <button className="link" onClick={() => set(null)} disabled={!isAnswered(answers[q.id])}>Clear response</button>
+            <span style={{ flex: 1 }} />
+            {idx < qs.length - 1
+              ? <button className="btn" onClick={() => setIdx(idx + 1)}>Next</button>
+              : <button className="btn dark" onClick={check} disabled={busy}>{busy ? 'Checking' : 'Check answers'}</button>}
+          </div>
+          {idx < qs.length - 1 && <p style={{ marginTop: 16 }}><button className="link" onClick={check} disabled={busy}>Check answers now</button></p>}
+          {err && <p className="error" role="alert" style={{ marginTop: 16 }}>{err}</p>}
+          <p style={{ marginTop: 28 }}><button className="link" onClick={onExit}>Leave practice</button></p>
+        </main>
+        <aside className="palette-wrap" aria-label="Question list">
+          <h3>Questions</h3>
+          <div className="palette">
+            {qs.map((x, i) => (
+              <button key={x.id} className={`pbtn ${isAnswered(answers[x.id]) ? 's-a' : ''} ${i === idx ? 'now' : ''}`} onClick={() => setIdx(i)}
+                aria-label={`Question ${i + 1}, ${isAnswered(answers[x.id]) ? 'answered' : 'not answered'}`} aria-current={i === idx ? 'true' : undefined}>
+                {i + 1}
+              </button>
+            ))}
+          </div>
+          <p className="muted small" style={{ marginTop: 12 }}>{done} of {qs.length} answered</p>
+        </aside>
+      </div>
+    </>
   )
 }
