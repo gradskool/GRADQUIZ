@@ -20,6 +20,15 @@ const MESSAGES = {
   BAD_TRANSITION: 'That change is not allowed for this quiz.',
   REVIEW_NOT_AVAILABLE: 'Answers are not open yet.',
   QUIZ_LOCKED: 'This quiz is locked. Questions and marking can only change while it is a draft.',
+  NOT_INVITED: 'This email is not on the list for this quiz. Use the email your instructor has for you, or ask them to add it.',
+  OTP_MISSING: 'Press Send code first, then type the code from your email.',
+  BAD_OTP: 'That code is wrong. Check the latest email and try again.',
+  OTP_EXPIRED: 'That code has expired. Press Resend code to get a new one.',
+  OTP_LOCKED: 'Too many wrong codes. Press Resend code to get a new one.',
+  OTP_WAIT: 'A code was just sent. Wait a minute before asking for another.',
+  SEND_FAILED: 'The email could not be sent. Try again in a minute, or tell your instructor.',
+  NOT_SET_UP: 'Email codes are not set up yet. Tell your instructor.',
+  SERVER: 'Something went wrong on our side. Try again.',
 }
 
 export class AppError extends Error {
@@ -46,6 +55,24 @@ export async function rpc(name, args) {
   const { data, error } = await supabase.rpc(name, args)
   if (error) throw toAppError(error)
   return data
+}
+
+// Emails the code for an Invited only quiz. Returns { wait } when a code was sent less than a minute ago.
+export async function sendQuizCode(code, email) {
+  let res
+  try {
+    res = await fetch('/.netlify/functions/send-otp', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ code, email }),
+    })
+  } catch (e) {
+    throw toAppError(e)
+  }
+  const data = await res.json().catch(() => ({ error: 'SERVER' }))
+  if (data.ok) return {}
+  if (data.error === 'OTP_WAIT') return { wait: data.wait || 60 }
+  throw toAppError(data.error || 'SERVER')
 }
 
 export function check(result) {

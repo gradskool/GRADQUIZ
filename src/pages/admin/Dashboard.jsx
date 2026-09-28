@@ -16,7 +16,7 @@ export default function Dashboard() {
     try {
       const data = check(await supabase
         .from('quizzes')
-        .select('id, code, title, status, duration_minutes, created_at, questions(count), attempts(count)')
+        .select('id, code, title, status, access, duration_minutes, created_at, questions(count), attempts(count)')
         .order('created_at', { ascending: false }))
       setQuizzes(data)
       const req = await supabase.from('attempts').select('quiz_id').not('link_requested_at', 'is', null)
@@ -70,6 +70,7 @@ export default function Dashboard() {
                 <tr key={q.id}>
                   <td>
                     <Link to={`/admin/quiz/${q.id}`}><b>{q.title}</b></Link>
+                    {q.access === 'invited' && <span className="chip">Invited only</span>}
                     {asks[q.id] > 0 && <Link to={`/admin/quiz/${q.id}/results`} className="chip">{asks[q.id]} asked for their link</Link>}
                   </td>
                   <td><span className="codechip">{q.code}</span></td>

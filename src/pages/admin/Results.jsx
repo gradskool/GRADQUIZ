@@ -18,6 +18,7 @@ export default function Results() {
   const [sort, setSort] = useState({ key: 'score', dir: 'desc' })
   const [open, setOpen] = useState(() => new Set())
   const [stamp, setStamp] = useState(null)
+  const [invites, setInvites] = useState([])
 
   const load = useCallback(async () => {
     try {
@@ -25,9 +26,11 @@ export default function Results() {
       const q = check(await supabase.from('quizzes').select('*').eq('id', id).single())
       const questions = check(await supabase.from('questions').select('id, position, kind, body, options, correct_index, accepted').eq('quiz_id', id).order('position'))
       const attempts = check(await supabase.from('attempts').select('id, token, link_requested_at, name, email, status, submit_reason, started_at, submitted_at, answers, graded, correct, wrong, unattempted, score, time_taken_seconds').eq('quiz_id', id))
+      const inv = check(await supabase.from('quiz_invites').select('email').eq('quiz_id', id).order('email'))
       setQuiz(q)
       setQs(questions)
       setRows(attempts)
+      setInvites(inv.map((r) => r.email))
       setStamp(new Date())
       setErr('')
     } catch (e) {
@@ -53,8 +56,12 @@ export default function Results() {
     }
   }
 
-  const submitted = rows.filter((r) => r.status === 'submitted')
+  const submitted = useMemo(() => rows.filter((r) => r.status === 'submitted'), [rows])
   const total = quiz ? qs.length * Number(quiz.marks_correct) : 0
+  const notStarted = useMemo(() => {
+    const joined = new Set(rows.map((r) => r.email.toLowerCase()))
+    return invites.filter((e) => !joined.has(e))
+  }, [invites, rows])
 
   const sorted = useMemo(() => {
     const dir = sort.dir === 'asc' ? 1 : -1
@@ -232,6 +239,20 @@ export default function Results() {
           </div>
         )}
       </section>
+
+      {quiz.access === 'invited' && (
+        <section className="block">
+          <div className="row between">
+            <h2 style={{ marginBottom: 0 }}>Invited, not started ({notStarted.length} of {invites.length})</h2>
+            {notStarted.length > 0 && (
+              <button className="btn ghost small" onClick={async () => { await copyText(notStarted.join('\n')); toast('Emails copied') }}>Copy emails</button>
+            )}
+          </div>
+          {notStarted.length === 0
+            ? <p className="muted" style={{ marginTop: 8 }}>{invites.length ? 'Every invited student has started.' : 'The invite list is empty.'}</p>
+            : <ul className="invites" style={{ marginTop: 12 }}>{notStarted.map((e) => <li key={e}><span>{e}</span></li>)}</ul>}
+        </section>
+      )}
 
       {submitted.length > 0 && (
         <section className="block">

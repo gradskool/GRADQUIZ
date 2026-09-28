@@ -19,13 +19,16 @@ export default function QuizEditor() {
   const [bulk, setBulk] = useState(false)
   const [expId, setExpId] = useState(null)
   const [expText, setExpText] = useState('')
+  const [invites, setInvites] = useState([])
 
   const load = useCallback(async () => {
     try {
       const q = check(await supabase.from('quizzes').select('*').eq('id', id).single())
       const questions = check(await supabase.from('questions').select('*').eq('quiz_id', id).order('position'))
+      const inv = check(await supabase.from('quiz_invites').select('email').eq('quiz_id', id).order('email'))
       setQuiz(q)
       setQs(questions)
+      setInvites(inv.map((r) => r.email))
       setForm((f) => f ?? {
         title: q.title,
         instructions: q.instructions || '',
@@ -36,6 +39,7 @@ export default function QuizEditor() {
         wrongTita: String(q.marks_wrong_tita),
         show: q.show_score,
         review: q.show_review,
+        access: q.access || 'open',
       })
     } catch (e) {
       setErr(e.message)
@@ -54,6 +58,7 @@ export default function QuizEditor() {
     form.instructions.trim() !== (quiz.instructions || '') ||
     form.show !== quiz.show_score ||
     form.review !== quiz.show_review ||
+    form.access !== (quiz.access || 'open') ||
     (draft && (
       form.code !== quiz.code ||
       Number(form.duration) !== quiz.duration_minutes ||
@@ -71,6 +76,7 @@ export default function QuizEditor() {
       instructions: form.instructions.trim() || null,
       show_score: form.show,
       show_review: form.review,
+      access: form.access,
     }
     if (draft) {
       const code = form.code.trim().toUpperCase()
@@ -213,13 +219,25 @@ export default function QuizEditor() {
             <span>Code</span>
             <input className="input codechip" value={form.code} onChange={(e) => setForm({ ...form, code: e.target.value.toUpperCase().replace(/[^A-Z0-9]/g, '') })} disabled={!draft} maxLength={12} />
           </label>
+          <fieldset className="field" style={{ border: 0, padding: 0, margin: 0 }}>
+            <legend style={{ fontWeight: 700, marginBottom: 8 }}>Who can take this quiz</legend>
+            <div className="kinds" role="radiogroup" aria-label="Who can take this quiz">
+              <button type="button" role="radio" aria-checked={form.access === 'open'} onClick={() => setForm({ ...form, access: 'open' })}>Open to anyone with the code</button>
+              <button type="button" role="radio" aria-checked={form.access === 'invited'} onClick={() => setForm({ ...form, access: 'invited' })}>Invited only</button>
+            </div>
+            <small style={{ display: 'block', marginTop: 8 }}>
+              {form.access === 'invited'
+                ? 'Only emails on the invite list below can start. Each student gets a 6 digit code by email to prove the email is theirs.'
+                : 'Anyone with the code or link can start.'}
+            </small>
+          </fieldset>
           <label className="check">
             <input type="checkbox" checked={form.show} onChange={set('show')} />
             <span>Show students their score after they submit. Turn this off to release scores later.</span>
           </label>
           <label className="check">
             <input type="checkbox" checked={form.review} onChange={set('review')} />
-            <span>Let students review their answers once the quiz has ended and every student has finished. They see their answer, the correct answer and your explanation for every question.</span>
+            <span>Let students review their answers right after they submit. They see their answer, the correct answer and your explanation for every question.</span>
           </label>
           <div className="row">
             <button className="btn" disabled={saving}>{saving ? 'Saving' : 'Save settings'}</button>
@@ -227,6 +245,10 @@ export default function QuizEditor() {
           </div>
         </form>
       </section>
+
+      {(form.access === 'invited' || quiz.access === 'invited' || invites.length > 0) && (
+        <InviteList quizId={id} invites={invites} onChange={load} live={quiz.access === 'invited'} />
+      )}
 
       <section className="block">
         <div className="row between">
@@ -318,6 +340,99 @@ export default function QuizEditor() {
   )
 }
 
+// Pulls every email out of whatever was pasted: one per line, comma separated, or copied from a sheet.
+const EMAIL_RE = /[^\s@,;<>()"']+@[^\s@,;<>()"']+\.[^\s@,;<>()"']+/g
+const extractEmails = (text) => [...new Set((text.match(EMAIL_RE) || []).map((e) => e.toLowerCase().replace(/\.+$/, '')))]
+
+function InviteList({ quizId, invites, onChange, live }) {
+  const toast = useToast()
+  const [text, setText] = useState('')
+  const [busy, setBusy] = useState(false)
+  const [err, setErr] = useState('')
+  const [filter, setFilter] = useState('')
+  const found = useMemo(() => extractEmails(text), [text])
+  const fresh = found.filter((e) => !invites.includes(e))
+  const shown = filter ? invites.filter((e) => e.includes(filter.toLowerCase())) : invites
+
+  async function add() {
+    setErr('')
+    setBusy(true)
+    try {
+      if (fresh.length) {
+        check(await supabase.from('quiz_invites').upsert(fresh.map((email) => ({ quiz_id: quizId, email })), { onConflict: 'quiz_id,email', ignoreDuplicates: true }))
+      }
+      toast(fresh.length === 1 ? '1 email added' : `${fresh.length} emails added`)
+      setText('')
+      await onChange()
+    } catch (ex) {
+      setErr(ex.message)
+    } finally {
+      setBusy(false)
+    }
+  }
+  async function remove(email) {
+    try {
+      check(await supabase.from('quiz_invites').delete().eq('quiz_id', quizId).eq('email', email))
+      await onChange()
+    } catch (ex) { setErr(ex.message) }
+  }
+  async function removeAll() {
+    if (!window.confirm(`Remove all ${invites.length} invited emails?`)) return
+    try {
+      check(await supabase.from('quiz_invites').delete().eq('quiz_id', quizId))
+      await onChange()
+    } catch (ex) { setErr(ex.message) }
+  }
+
+  return (
+    <section className="block">
+      <div className="row between">
+        <h2 style={{ marginBottom: 0 }}>Invite list ({invites.length})</h2>
+        {invites.length > 0 && (
+          <div className="row">
+            <button className="btn ghost small" onClick={async () => { await copyText(invites.join('\n')); toast('Emails copied') }}>Copy all</button>
+            <button className="link danger" onClick={removeAll}>Remove all</button>
+          </div>
+        )}
+      </div>
+      {!live && <p className="muted" style={{ marginTop: 8 }}>This list is used only when the quiz is set to Invited only and saved.</p>}
+      {live && invites.length === 0 && <div className="notice" style={{ marginTop: 12 }}>The quiz is Invited only but the list is empty, so nobody can start it.</div>}
+      <p className="muted small" style={{ marginTop: 8 }}>You can add or remove emails at any time, even while the quiz is live. Removing an email does not remove an attempt already started.</p>
+
+      <div className="stack" style={{ marginTop: 16 }}>
+        <label className="field">
+          <span>Add emails</span>
+          <textarea className="textarea" style={{ minHeight: 96 }} value={text} onChange={(e) => setText(e.target.value)} placeholder={'amit@gmail.com\nriya@gmail.com\nor paste a column straight from a sheet'} />
+          <small>One per line, or commas. Names and other text are ignored, only the emails are picked up.</small>
+        </label>
+        {text.trim() && (
+          <p className="small">
+            <b>{found.length}</b> {found.length === 1 ? 'email' : 'emails'} found{found.length - fresh.length > 0 ? `, ${found.length - fresh.length} already on the list` : ''}.
+          </p>
+        )}
+        {err && <p className="error" role="alert">{err}</p>}
+        <div><button className="btn small" onClick={add} disabled={busy || fresh.length === 0}>{busy ? 'Adding' : `Add ${fresh.length || ''} ${fresh.length === 1 ? 'email' : 'emails'}`.replace('  ', ' ')}</button></div>
+      </div>
+
+      {invites.length > 0 && (
+        <div style={{ marginTop: 20 }}>
+          {invites.length > 10 && (
+            <input className="input" style={{ maxWidth: 320, marginBottom: 12 }} value={filter} onChange={(e) => setFilter(e.target.value)} placeholder="Search emails" aria-label="Search emails" />
+          )}
+          <ul className="invites">
+            {shown.map((e) => (
+              <li key={e}>
+                <span>{e}</span>
+                <button className="link danger" onClick={() => remove(e)} aria-label={`Remove ${e}`}>Remove</button>
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+    </section>
+  )
+}
+
 // Text answers match without regard to capitals, so drop repeats that differ only by case.
 const uniqueCI = (list) => { const seen = new Set(); return list.filter((x) => { const k = x.toLowerCase(); if (seen.has(k)) return false; seen.add(k); return true }) }
 
@@ -400,7 +515,7 @@ function QuestionForm({ initial, onSave, onCancel }) {
       <label className="field">
         <span>Explanation (optional)</span>
         <textarea className="textarea" style={{ minHeight: 72 }} value={expl} onChange={(e) => setExpl(e.target.value)} />
-        <small>Students see this in the answer review after the quiz ends.</small>
+        <small>Students see this in the answer review after they submit.</small>
       </label>
       {err && <p className="error" role="alert">{err}</p>}
       <div className="row">
@@ -451,7 +566,7 @@ function BulkImport({ onAdd, onCancel }) {
       <label className="field">
         <span>Paste questions</span>
         <textarea className="textarea" style={{ minHeight: 220 }} value={text} onChange={(e) => setText(e.target.value)} placeholder={SAMPLE} autoFocus />
-        <small>One block per question. Multiple choice needs lettered options and an Ans line with the letter. A type-in question has no options, just Ans with the value. Put alternatives on one line with a bar, like Ans: 3.5 | 7/2. Add an optional Exp line after Ans for the explanation.</small>
+        <small>One block per question. Multiple choice needs lettered options and an Ans line with the letter. A type-in question has no options, just Ans with the value. Put alternatives on one line with a bar, like Ans: 3.5 | 7/2. A one-letter type-in answer goes in quotes, like Ans: "C". Write lettered statements as (i), (ii) so they are not read as options. Add an optional Exp line after Ans for the explanation.</small>
       </label>
       {text.trim() && (
         <div>

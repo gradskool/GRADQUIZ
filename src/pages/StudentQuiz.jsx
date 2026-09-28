@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useParams, useSearchParams } from 'react-router-dom'
 import Brand from '../components/Brand.jsx'
-import { rpc } from '../lib/supabase.js'
+import { rpc, sendQuizCode, toAppError } from '../lib/supabase.js'
 import { LETTERS, clock, copyText, num, spoken } from '../lib/util.js'
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
@@ -166,6 +166,55 @@ function Lobby({ code, info, setInfo, onStarted, onFound }) {
   const [fPin, setFPin] = useState('')
   const [fErr, setFErr] = useState('')
   const [fBusy, setFBusy] = useState(false)
+  const invited = info.access === 'invited'
+  const [sentTo, setSentTo] = useState('') // the email the code went to
+  const [otp, setOtp] = useState('')
+  const [sending, setSending] = useState(false)
+  const [wait, setWait] = useState(0)
+  const [sentNote, setSentNote] = useState('')
+
+  useEffect(() => {
+    if (wait <= 0) return
+    const t = setTimeout(() => setWait((w) => w - 1), 1000)
+    return () => clearTimeout(t)
+  }, [wait])
+
+  // Checks name, email and PIN before a code is sent, so nobody gets a code and then hits a form error.
+  function formProblem() {
+    if (name.trim().replace(/\s+/g, ' ').length < 2) return 'Enter your full name.'
+    if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email.trim())) return 'Enter a valid email address.'
+    if (!/^[0-9]{4,6}$/.test(pin.trim())) return 'Choose a PIN with 4 to 6 digits.'
+    return ''
+  }
+
+  async function sendCode() {
+    setErr('')
+    setSentNote('')
+    const problem = formProblem()
+    if (problem) return setErr(problem)
+    const to = email.trim().toLowerCase()
+    setSending(true)
+    try {
+      const r = await sendQuizCode(code, to)
+      if (r.wait) {
+        setWait(r.wait)
+        if (sentTo === to) setSentNote(`A code was just sent. You can ask for another in ${r.wait} seconds.`)
+        else { setSentTo(to); setSentNote('A code was sent to this email a moment ago. Use that one.') }
+      } else {
+        setSentTo(to)
+        setOtp('')
+        setWait(60)
+        setSentNote(`Code sent to ${to}. Check spam or promotions if you do not see it.`)
+      }
+    } catch (ex) {
+      setErr(ex.message)
+      if (ex.code === 'QUIZ_ENDED' || ex.code === 'QUIZ_NOT_STARTED') {
+        try { setInfo(await rpc('quiz_info', { p_code: code })) } catch { /* ignore */ }
+      }
+    } finally {
+      setSending(false)
+    }
+  }
 
   async function find(e) {
     e.preventDefault()
@@ -194,11 +243,16 @@ function Lobby({ code, info, setInfo, onStarted, onFound }) {
   async function start(e) {
     e.preventDefault()
     setErr('')
+    if (invited && !sentTo) return sendCode()
     if (!/^[0-9]{4,6}$/.test(pin.trim())) return setErr('Choose a PIN with 4 to 6 digits.')
+    if (invited && !/^[0-9]{6}$/.test(otp.trim())) return setErr('Type the 6 digit code from your email.')
     setBusy(true)
     try {
-      const st = await rpc('start_attempt', { p_code: code, p_name: name, p_email: email, p_pin: pin.trim() })
-      onStarted(st, { name: name.trim(), email: email.trim().toLowerCase() })
+      const args = { p_code: code, p_name: name, p_email: invited ? sentTo : email, p_pin: pin.trim() }
+      if (invited) args.p_otp = otp.trim()
+      const st = await rpc('start_attempt', args)
+      if (st?.error) throw toAppError(st.error)
+      onStarted(st, { name: name.trim(), email: args.p_email.trim().toLowerCase() })
     } catch (ex) {
       setErr(ex.message)
       if (ex.code === 'QUIZ_ENDED' || ex.code === 'QUIZ_NOT_STARTED') {
@@ -249,7 +303,7 @@ function Lobby({ code, info, setInfo, onStarted, onFound }) {
             </label>
             <label className="field">
               <span>Email</span>
-              <input className="input" type="email" value={email} onChange={(e) => setEmail(e.target.value)} autoComplete="email" inputMode="email" required />
+              <input className="input" type="email" value={email} onChange={(e) => setEmail(e.target.value)} autoComplete="email" inputMode="email" required readOnly={Boolean(sentTo)} />
             </label>
           </div>
           <label className="field" style={{ maxWidth: 260 }}>
@@ -257,11 +311,33 @@ function Lobby({ code, info, setInfo, onStarted, onFound }) {
             <input className="input" value={pin} onChange={(e) => setPin(e.target.value.replace(/\D/g, '').slice(0, 6))} inputMode="numeric" autoComplete="off" maxLength={6} placeholder="4 to 6 digits" required />
             <small>Choose a PIN you will remember. With your email it lets you see your result again later. Do not use a phone number.</small>
           </label>
+          {invited && sentTo && (
+            <label className="field" style={{ maxWidth: 260 }}>
+              <span>Code from your email</span>
+              <input className="input codechip" value={otp} onChange={(e) => setOtp(e.target.value.replace(/\D/g, '').slice(0, 6))} inputMode="numeric" autoComplete="one-time-code" maxLength={6} placeholder="6 digits" autoFocus />
+            </label>
+          )}
+          {invited && sentNote && <p className="muted small" role="status">{sentNote}</p>}
           <p className="muted small">
+            {invited && !sentTo && 'This quiz is only for invited students. We will email you a code to confirm it is you. '}
             Your timer starts when you press Start. You can attempt this quiz once. If the page closes, reopen this link on the same device to continue.
           </p>
           {err && <p className="error" role="alert">{err}</p>}
-          <div><button className="btn" disabled={busy}>{busy ? 'Starting' : 'Start quiz'}</button></div>
+          <div className="row">
+            {invited && !sentTo ? (
+              <button className="btn" disabled={sending}>{sending ? 'Sending' : 'Send code to my email'}</button>
+            ) : (
+              <button className="btn" disabled={busy}>{busy ? 'Starting' : 'Start quiz'}</button>
+            )}
+            {invited && sentTo && (
+              <>
+                <button type="button" className="link" onClick={sendCode} disabled={sending || wait > 0}>
+                  {sending ? 'Sending' : wait > 0 ? `Resend code in ${wait}s` : 'Resend code'}
+                </button>
+                <button type="button" className="link" onClick={() => { setSentTo(''); setOtp(''); setSentNote(''); setErr('') }}>Change email</button>
+              </>
+            )}
+          </div>
         </form>
       )}
 
@@ -316,6 +392,9 @@ function Exam({ init, creds, onDone }) {
   const again = useRef(false)
   const first = useRef(true)
   const saveTimer = useRef()
+  const lost = useRef(false)
+  const lastSaved = useRef(JSON.stringify(init.answers || {}))
+  const beats = useRef(0)
   const offset = useRef(new Date(init.server_now).getTime() - Date.now())
   const deadline = useMemo(() => new Date(init.deadline).getTime(), [init.deadline])
 
@@ -328,15 +407,18 @@ function Exam({ init, creds, onDone }) {
   }, [])
 
   const save = useCallback(async () => {
-    if (finished.current) return
+    if (finished.current || lost.current) return
     if (inflight.current) { again.current = true; return }
     inflight.current = true
+    const snap = JSON.stringify(answersRef.current)
     try {
       const res = await rpc('save_answers', { p_attempt: creds.attemptId, p_token: creds.token, p_answers: answersRef.current })
+      lastSaved.current = snap
       if (res.status === 'submitted') finish(res)
       else setSync('saved')
     } catch (e) {
-      setSync(e.code === 'INVALID_ATTEMPT' ? 'saved' : 'offline')
+      if (e.code === 'INVALID_ATTEMPT') { lost.current = true; setSync('lost') }
+      else setSync('offline')
     } finally {
       inflight.current = false
       if (again.current) { again.current = false; save() }
@@ -352,6 +434,12 @@ function Exam({ init, creds, onDone }) {
       finish(res)
     } catch (e) {
       setBusy(false)
+      if (e.code === 'INVALID_ATTEMPT') {
+        lost.current = true
+        setSync('lost')
+        setConfirm(false)
+        return
+      }
       setErr('Could not submit. Check your connection. Trying again shortly.')
       if (auto || e.code === 'NETWORK') setTimeout(() => submit(true), 3000)
     }
@@ -383,8 +471,13 @@ function Exam({ init, creds, onDone }) {
     return () => clearTimeout(saveTimer.current)
   }, [answers, save])
 
+  // Heartbeat. Saves every 12 s when something changed, otherwise checks in once a minute
+  // so a student submitted by the instructor still finds out.
   useEffect(() => {
-    const t = setInterval(save, 12000)
+    const t = setInterval(() => {
+      beats.current += 1
+      if (JSON.stringify(answersRef.current) !== lastSaved.current || beats.current % 5 === 0) save()
+    }, 12000)
     return () => clearInterval(t)
   }, [save])
 
@@ -420,14 +513,14 @@ function Exam({ init, creds, onDone }) {
     return () => window.removeEventListener('keydown', onKey)
   }, [confirm, busy, idx, qs])
 
-  const syncText = sync === 'offline' ? 'Offline. Retrying.' : sync === 'saving' ? 'Saving' : 'Saved'
+  const syncText = sync === 'lost' ? 'Not saved' : sync === 'offline' ? 'Offline. Retrying.' : sync === 'saving' ? 'Saving' : 'Saved'
 
   return (
     <>
       <header className="exambar">
         <span className="title">{init.title}</span>
         <div className="row" style={{ gap: 18, flexWrap: 'nowrap' }}>
-          <span className={`sync ${sync === 'offline' ? 'off' : ''}`} role="status">{syncText}</span>
+          <span className={`sync ${sync === 'offline' || sync === 'lost' ? 'off' : ''}`} role="status">{syncText}</span>
           <span className={`timer ${left <= 300000 ? 'low' : ''}`} role="timer" aria-label="Time left">{clock(left / 1000)}</span>
         </div>
       </header>
@@ -479,6 +572,11 @@ function Exam({ init, creds, onDone }) {
             <button className="btn dark" onClick={() => setConfirm(true)}>Submit quiz</button>
           </div>
           {err && <p className="error" role="alert" style={{ marginTop: 16 }}>{err}</p>}
+          {sync === 'lost' && (
+            <p className="error" role="alert" style={{ marginTop: 16 }}>
+              This attempt no longer exists, so your answers are not being saved. Ask your instructor.
+            </p>
+          )}
         </main>
 
         <aside className="palette-wrap" aria-label="Question list">
@@ -568,7 +666,7 @@ function Result({ res, onCheck, onReview, reviewErr, link, onSetPin }) {
       )}
       {res.review_on && !res.review_available && (
         <div className="stack" style={{ marginTop: 32 }}>
-          <div className="notice plain">You can review every answer once the quiz has ended and everyone has finished.</div>
+          <div className="notice plain">Answer review is not open yet. Check again in a bit.</div>
           <div><button className="btn ghost" onClick={onCheck}>Check again</button></div>
         </div>
       )}

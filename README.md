@@ -65,6 +65,21 @@ Open http://localhost:5173/admin and sign in.
 3. Add the environment variables `VITE_SUPABASE_URL` and `VITE_SUPABASE_ANON_KEY`.
 4. Deploy. Add a custom domain such as quiz.gradskool.in if you like.
 
+## Invited only quizzes
+
+In a quiz's Settings choose **Invited only**, save, then paste the allowed emails into the Invite list (one per line, commas, or a column straight from a sheet). Students on the list enter name, email and PIN, press **Send code to my email**, and type the 6 digit code to start. Codes last 10 minutes, a new one can be asked for after 60 seconds, and 5 wrong tries need a new code. The Results page lists invited students who have not started.
+
+One time setup:
+1. Run `supabase/patch_invited_only.sql` in the SQL Editor (already inside `schema.sql` for new installs).
+2. On the Gmail account that sends codes, turn on 2-Step Verification, then create an App password at myaccount.google.com/apppasswords.
+3. In Netlify, Site configuration, Environment variables, add these with Functions in their scope, then redeploy.
+   - `SUPABASE_SERVICE_ROLE_KEY` from Supabase, Project Settings, API. Never give it a `VITE_` prefix, that would put it in the website.
+   - `GMAIL_USER` the Gmail address.
+   - `GMAIL_APP_PASSWORD` the 16 character app password.
+   - `SUPABASE_URL` is optional, `VITE_SUPABASE_URL` is used when it is missing.
+
+A normal Gmail account sends about 500 emails a day. `npm run dev` does not run the email function, use `netlify dev` to test codes locally.
+
 ## Paste format for many questions
 
 ```

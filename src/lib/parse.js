@@ -9,6 +9,9 @@
 //   Q2. What is 6 x 7?
 //   Ans: 42
 //   Alternatives go on the same line with a bar, like  Ans: 3.5 | 7/2
+//   A type-in answer that is a single letter goes in quotes, like  Ans: "C"
+// Options must be lettered in order, A) B) C). Lettered statements inside the question
+// (A. ... B. ...) are caught instead of being read as options. Write those as (i), (ii) or 1., 2.
 const OPTION = /^\(?([A-Fa-f])[).:]\s+(.*\S)\s*$/
 const ANS_LETTER = /^(?:ans(?:wer)?|correct)\s*[:\-=]?\s*\(?([A-Fa-f])\)?\s*$/i
 const ANS_TEXT = /^(?:ans(?:wer)?|correct)\s*[:=\-]\s*(.+?)\s*$/i
@@ -55,7 +58,12 @@ export function parseQuestions(text) {
 
     const letter = line.match(ANS_LETTER)
     if (letter && cur) {
-      if (cur.options.length === 0) { cur.problem = 'has an answer letter but no options. For a type-in question write the value, like "Ans: 42".'; close() }
+      if (cur.options.length === 0) {
+        cur.problem = cur.numbered
+          ? 'has an answer letter but no lettered options. Options must start with A), B) and so on, not 1), 2).'
+          : 'has an answer letter but no options. For a type-in answer that is a letter, put it in quotes, like Ans: "C".'
+        close()
+      }
       else { cur.answer = letter[1].toUpperCase().charCodeAt(0) - 65; cur.done = true }
       continue
     }
@@ -63,12 +71,22 @@ export function parseQuestions(text) {
     const typed = line.match(ANS_TEXT)
     if (typed && cur) {
       if (cur.options.length > 0) { cur.problem = 'has options, so the answer must be a letter like "Ans: B".'; close() }
-      else { cur.accepted = [...new Map(typed[1].split('|').map((x) => x.trim()).filter(Boolean).map((x) => [x.toLowerCase(), x])).values()].slice(0, 10); cur.done = true }
+      else {
+        const list = typed[1].split('|').map((x) => x.trim().replace(/^(["'])(.*)\1$/, '$2').trim()).filter(Boolean)
+        cur.accepted = [...new Map(list.map((x) => [x.toLowerCase(), x])).values()].slice(0, 10)
+        if (cur.accepted.length === 0) { cur.accepted = null; cur.problem = 'has an empty answer.'; close(); continue }
+        cur.done = true
+      }
       continue
     }
 
     const opt = line.match(OPTION)
     if (opt && cur && cur.body) {
+      const got = opt[1].toUpperCase()
+      const want = String.fromCharCode(65 + cur.options.length)
+      if (got !== want && !cur.problem) {
+        cur.problem = `option letters are out of order (found ${got} where ${want} was expected). If the question has lettered statements like A. and B., write them as (i), (ii) or 1., 2. so they stay in the question.`
+      }
       cur.options.push(opt[2])
       continue
     }
@@ -77,8 +95,9 @@ export function parseQuestions(text) {
     if (!cur || (startsQ && cur.options.length > 0)) {
       if (cur) close()
       n += 1
-      cur = { body: line.replace(QPREFIX, '').trim(), options: [], answer: null, accepted: null, problem: null, explanation: null, done: false, inExp: false }
+      cur = { body: line.replace(QPREFIX, '').trim(), options: [], answer: null, accepted: null, problem: null, explanation: null, done: false, inExp: false, numbered: false }
     } else if (cur.options.length === 0) {
+      if (startsQ && /^\d/.test(line)) cur.numbered = true
       cur.body += (cur.body ? '\n' : '') + line.replace(QPREFIX, '')
     } else {
       cur.options[cur.options.length - 1] += ' ' + line
