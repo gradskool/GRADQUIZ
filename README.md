@@ -80,6 +80,18 @@ One time setup:
 
 A normal Gmail account sends about 500 emails a day. `npm run dev` does not run the email function, use `netlify dev` to test codes locally.
 
+## Round 3 features
+
+- **Fix the key after start.** On a started quiz each question has Change answer key. Pick the right option or edit accepted answers, or tick Bonus to give everyone full marks. Every submitted attempt is re-scored at once.
+- **Rank and percentile.** Students see their rank and percentile under the score when scores are shown. Percentile is the share of submitted students at or below their score. Tick "Show the top 10" for a leaderboard. The result page refreshes every 30 seconds.
+- **CAT palette.** Answered, not answered, not visited, marked for review, and answered and marked (these are scored). Mark for review & next, Save & next.
+- **Time per question.** Stored per attempt. Results show average time per question, the answer sheet shows each student's time, students see their time and the class average in the review. Also in the CSV.
+- **Schedule.** Start automatically at, and Close entry at. Closing entry works like End quiz. Schedules run when anyone opens the quiz and every minute through the cron job.
+- **Shuffle and tabs.** Shuffle questions and options per student. Tab switches and time away are recorded and shown in Results and the CSV.
+- **Students.** Admin, Students lists everyone by email. Open one for every quiz they took with score, rank, percentile and a percentile trend.
+
+Run `supabase/patch_round3.sql` before deploying these pages.
+
 ## Paste format for many questions
 
 ```

@@ -6,6 +6,15 @@ import { parseQuestions } from '../../lib/parse.js'
 import { useToast } from '../../components/Toast.jsx'
 import QuizControls from '../../components/QuizControls.jsx'
 
+// <input type="datetime-local"> works in local time without seconds.
+const toLocalInput = (iso) => {
+  if (!iso) return ''
+  const d = new Date(iso)
+  const pad = (n) => String(n).padStart(2, '0')
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`
+}
+const fromLocalInput = (v) => (v ? new Date(v).toISOString() : null)
+
 export default function QuizEditor() {
   const { id } = useParams()
   const nav = useNavigate()
@@ -20,9 +29,11 @@ export default function QuizEditor() {
   const [expId, setExpId] = useState(null)
   const [expText, setExpText] = useState('')
   const [invites, setInvites] = useState([])
+  const [keyId, setKeyId] = useState(null)
 
   const load = useCallback(async () => {
     try {
+      await supabase.rpc('finalize_expired', { p_quiz: id }) // also applies a scheduled start or close
       const q = check(await supabase.from('quizzes').select('*').eq('id', id).single())
       const questions = check(await supabase.from('questions').select('*').eq('quiz_id', id).order('position'))
       const inv = check(await supabase.from('quiz_invites').select('email').eq('quiz_id', id).order('email'))
@@ -40,6 +51,11 @@ export default function QuizEditor() {
         show: q.show_score,
         review: q.show_review,
         access: q.access || 'open',
+        board: Boolean(q.show_leaderboard),
+        shufQ: Boolean(q.shuffle_questions),
+        shufO: Boolean(q.shuffle_options),
+        startsAt: toLocalInput(q.starts_at),
+        endsAt: toLocalInput(q.ends_at),
       })
     } catch (e) {
       setErr(e.message)
@@ -47,6 +63,13 @@ export default function QuizEditor() {
   }, [id])
 
   useEffect(() => { load() }, [load])
+  // A scheduled quiz can start or close while this page is open.
+  const watch = quiz && ((quiz.status === 'draft' && quiz.starts_at) || (quiz.status === 'live' && quiz.ends_at))
+  useEffect(() => {
+    if (!watch) return
+    const t = setInterval(load, 15000)
+    return () => clearInterval(t)
+  }, [watch, load])
 
   if (err && !quiz) return <main className="page"><p className="error" role="alert">{err}</p></main>
   if (!quiz || !form) return <main className="page"><p className="muted">Loading.</p></main>
@@ -59,7 +82,12 @@ export default function QuizEditor() {
     form.show !== quiz.show_score ||
     form.review !== quiz.show_review ||
     form.access !== (quiz.access || 'open') ||
+    form.board !== Boolean(quiz.show_leaderboard) ||
+    (quiz.status !== 'ended' && form.endsAt !== toLocalInput(quiz.ends_at)) ||
     (draft && (
+      form.shufQ !== Boolean(quiz.shuffle_questions) ||
+      form.shufO !== Boolean(quiz.shuffle_options) ||
+      form.startsAt !== toLocalInput(quiz.starts_at) ||
       form.code !== quiz.code ||
       Number(form.duration) !== quiz.duration_minutes ||
       Number(form.correct) !== Number(quiz.marks_correct) ||
@@ -77,6 +105,18 @@ export default function QuizEditor() {
       show_score: form.show,
       show_review: form.review,
       access: form.access,
+      show_leaderboard: form.board,
+    }
+    if (quiz.status !== 'ended') patch.ends_at = fromLocalInput(form.endsAt)
+    if (draft) {
+      patch.starts_at = fromLocalInput(form.startsAt)
+      patch.shuffle_questions = form.shufQ
+      patch.shuffle_options = form.shufO
+      if (patch.starts_at && patch.ends_at && new Date(patch.ends_at) <= new Date(patch.starts_at)) {
+        return setErr('Entry must close after the scheduled start.')
+      }
+      if (patch.starts_at && new Date(patch.starts_at) <= new Date() &&
+          !window.confirm('The start time has already passed, so the quiz will start as soon as a student opens it. Save anyway?')) return
     }
     if (draft) {
       const code = form.code.trim().toUpperCase()
@@ -239,6 +279,36 @@ export default function QuizEditor() {
             <input type="checkbox" checked={form.review} onChange={set('review')} />
             <span>Let students review their answers right after they submit. They see their answer, the correct answer and your explanation for every question.</span>
           </label>
+          <label className="check">
+            <input type="checkbox" checked={form.board} onChange={set('board')} disabled={!form.show} />
+            <span>Show the top 10 by name on the result page. Needs the score to be shown. Every student always sees their own rank and percentile when scores are shown.</span>
+          </label>
+          <label className="check">
+            <input type="checkbox" checked={form.shufQ} onChange={set('shufQ')} disabled={!draft} />
+            <span>Shuffle the question order for each student.</span>
+          </label>
+          <label className="check">
+            <input type="checkbox" checked={form.shufO} onChange={set('shufO')} disabled={!draft} />
+            <span>Shuffle the options of multiple choice questions for each student. Results and the CSV always use your original letters.</span>
+          </label>
+
+          <fieldset className="field" style={{ border: 0, padding: 0, margin: 0 }}>
+            <legend style={{ fontWeight: 700, marginBottom: 8 }}>Schedule (optional)</legend>
+            <div className="grid2">
+              <label className="field">
+                <span>Start automatically at</span>
+                <input className="input" type="datetime-local" value={form.startsAt} onChange={set('startsAt')} disabled={!draft} />
+              </label>
+              <label className="field">
+                <span>Close entry at</span>
+                <input className="input" type="datetime-local" value={form.endsAt} onChange={set('endsAt')} disabled={quiz.status === 'ended'} />
+              </label>
+            </div>
+            <small style={{ display: 'block', marginTop: 8 }}>
+              Leave empty to use the Start and End buttons. Closing entry works like End quiz: nobody new can start, and anyone already working finishes on their own timer.
+              {' '}Times are in your computer's time zone.
+            </small>
+          </fieldset>
           <div className="row">
             <button className="btn" disabled={saving}>{saving ? 'Saving' : 'Save settings'}</button>
             {dirty && <span className="error" role="status">You have unsaved changes.</span>}
@@ -260,7 +330,7 @@ export default function QuizEditor() {
             </div>
           )}
         </div>
-        {!draft && <p className="muted" style={{ marginTop: 8 }}>Questions are locked. You can still add or change explanations.</p>}
+        {!draft && <p className="muted" style={{ marginTop: 8 }}>Questions are locked. You can still change explanations, fix the answer key or make a question a bonus. A key change re-scores every submitted attempt.</p>}
 
         {draft && editing === 'new' && (
           <QuestionForm
@@ -289,6 +359,7 @@ export default function QuizEditor() {
               <div className="qrow" key={q.id}>
                 <span className="no">{i + 1}</span>
                 <div>
+                  {q.bonus && <p className="chip" style={{ marginLeft: 0, marginBottom: 6 }}>Bonus, full marks to everyone</p>}
                   <p style={{ whiteSpace: 'pre-wrap' }}>{q.body}</p>
                   {q.kind === 'tita' ? (
                     <p className="accepted"><span className="muted">Type-in. Accepted </span><b>{q.accepted.join('  or  ')}</b></p>
@@ -298,6 +369,18 @@ export default function QuizEditor() {
                         <li key={k} className={k === q.correct_index ? 'right' : ''}><b>{LETTERS[k]}</b><span>{o}</span></li>
                       ))}
                     </ol>
+                  )}
+                  {keyId === q.id && (
+                    <KeyForm
+                      q={q}
+                      onCancel={() => setKeyId(null)}
+                      onSave={async (row) => {
+                        check(await supabase.from('questions').update(row).eq('id', q.id))
+                        setKeyId(null)
+                        toast('Answer key saved. Every submitted attempt was re-scored.')
+                        await load()
+                      }}
+                    />
                   )}
                   {expId === q.id ? (
                     <div className="stack" style={{ marginTop: 12 }}>
@@ -314,9 +397,10 @@ export default function QuizEditor() {
                     q.explanation && <p className="muted small" style={{ marginTop: 10, whiteSpace: 'pre-wrap' }}>Explanation. {q.explanation}</p>
                   )}
                 </div>
-                {!draft && expId !== q.id && (
+                {!draft && expId !== q.id && keyId !== q.id && (
                   <div className="qactions">
                     <button className="link" onClick={() => { setExpText(q.explanation || ''); setExpId(q.id) }}>{q.explanation ? 'Edit explanation' : 'Add explanation'}</button>
+                    <button className="link" onClick={() => { setExpId(null); setKeyId(q.id) }}>Change answer key</button>
                   </div>
                 )}
                 {draft && (
@@ -337,6 +421,68 @@ export default function QuizEditor() {
         <button className="link danger" onClick={deleteQuiz}>Delete this quiz</button>
       </section>
     </main>
+  )
+}
+
+// Fixes the key after the quiz has started. The database re-scores every submitted attempt.
+function KeyForm({ q, onSave, onCancel }) {
+  const [correct, setCorrect] = useState(q.correct_index ?? 0)
+  const [accepted, setAccepted] = useState(q.kind === 'tita' ? q.accepted.join('\n') : '')
+  const [bonus, setBonus] = useState(Boolean(q.bonus))
+  const [err, setErr] = useState('')
+  const [busy, setBusy] = useState(false)
+
+  async function save(e) {
+    e.preventDefault()
+    setErr('')
+    const row = { bonus }
+    if (q.kind === 'tita') {
+      const list = uniqueCI(accepted.split('\n').map((x) => x.trim()).filter(Boolean))
+      if (list.length === 0) return setErr('Add the accepted answer.')
+      if (list.length > 10) return setErr('Use at most 10 accepted answers.')
+      if (list.some((x) => x.length > 40)) return setErr('Each accepted answer can be up to 40 characters.')
+      row.accepted = list
+    } else {
+      row.correct_index = correct
+    }
+    setBusy(true)
+    try {
+      await onSave(row)
+    } catch (ex) {
+      setErr(ex.message)
+      setBusy(false)
+    }
+  }
+
+  return (
+    <form className="qform stack" onSubmit={save} noValidate style={{ marginTop: 12 }}>
+      {q.kind === 'tita' ? (
+        <label className="field">
+          <span>Accepted answers</span>
+          <textarea className="textarea" style={{ minHeight: 72 }} value={accepted} onChange={(e) => setAccepted(e.target.value)} />
+          <small>One per line.</small>
+        </label>
+      ) : (
+        <fieldset style={{ border: 0, padding: 0, margin: 0 }}>
+          <legend style={{ fontWeight: 700, marginBottom: 4 }}>Correct option</legend>
+          {q.options.map((o, i) => (
+            <label key={i} className="check" style={{ marginTop: 6 }}>
+              <input type="radio" name={`key-${q.id}`} checked={correct === i} onChange={() => setCorrect(i)} />
+              <span><b>{LETTERS[i]}</b> {o}</span>
+            </label>
+          ))}
+        </fieldset>
+      )}
+      <label className="check">
+        <input type="checkbox" checked={bonus} onChange={(e) => setBonus(e.target.checked)} />
+        <span>Bonus. Everyone gets full marks for this question, whatever they answered.</span>
+      </label>
+      {err && <p className="error" role="alert">{err}</p>}
+      <div className="row">
+        <button className="btn small" disabled={busy}>{busy ? 'Re-scoring' : 'Save and re-score'}</button>
+        <button type="button" className="btn ghost small" onClick={onCancel} disabled={busy}>Cancel</button>
+      </div>
+    </form>
   )
 }
 

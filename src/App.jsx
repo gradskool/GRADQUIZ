@@ -6,6 +6,8 @@ import AdminGate from './pages/admin/AdminGate.jsx'
 import Dashboard from './pages/admin/Dashboard.jsx'
 import QuizEditor from './pages/admin/QuizEditor.jsx'
 import Results from './pages/admin/Results.jsx'
+import Students from './pages/admin/Students.jsx'
+import StudentHistory from './pages/admin/StudentHistory.jsx'
 import { configured } from './lib/supabase.js'
 
 function Missing() {
@@ -28,6 +30,8 @@ export default function App() {
           <Route index element={<Dashboard />} />
           <Route path="quiz/:id" element={<QuizEditor />} />
           <Route path="quiz/:id/results" element={<Results />} />
+          <Route path="students" element={<Students />} />
+          <Route path="students/:email" element={<StudentHistory />} />
         </Route>
         <Route path="*" element={<Navigate to="/" replace />} />
       </Routes>

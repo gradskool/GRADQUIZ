@@ -80,6 +80,7 @@ export default function AdminGate() {
         <Brand to="/admin" />
         <nav>
           <Link to="/admin">Quizzes</Link>
+          <Link to="/admin/students">Students</Link>
           <button className="link" onClick={() => supabase.auth.signOut()}>Sign out</button>
         </nav>
       </header>

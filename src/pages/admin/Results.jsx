@@ -5,7 +5,7 @@ import { LETTERS, copyText, downloadCsv, formatWhen, num, spoken } from '../../l
 import { useToast } from '../../components/Toast.jsx'
 import QuizControls from '../../components/QuizControls.jsx'
 
-const keyText = (q) => (q.kind === 'tita' ? q.accepted.join(' or ') : LETTERS[q.correct_index])
+const keyText = (q) => (q.bonus ? 'Bonus' : q.kind === 'tita' ? q.accepted.join(' or ') : LETTERS[q.correct_index])
 const givenText = (q, a) => (a == null ? '' : q.kind === 'tita' ? String(a) : LETTERS[a])
 
 export default function Results() {
@@ -24,8 +24,8 @@ export default function Results() {
     try {
       await supabase.rpc('finalize_expired', { p_quiz: id })
       const q = check(await supabase.from('quizzes').select('*').eq('id', id).single())
-      const questions = check(await supabase.from('questions').select('id, position, kind, body, options, correct_index, accepted').eq('quiz_id', id).order('position'))
-      const attempts = check(await supabase.from('attempts').select('id, token, link_requested_at, name, email, status, submit_reason, started_at, submitted_at, answers, graded, correct, wrong, unattempted, score, time_taken_seconds').eq('quiz_id', id))
+      const questions = check(await supabase.from('questions').select('id, position, kind, body, options, correct_index, accepted, bonus').eq('quiz_id', id).order('position'))
+      const attempts = check(await supabase.from('attempts').select('id, token, link_requested_at, name, email, status, submit_reason, started_at, submitted_at, answers, graded, correct, wrong, unattempted, score, time_taken_seconds, times, tab_switches, away_seconds').eq('quiz_id', id))
       const inv = check(await supabase.from('quiz_invites').select('email').eq('quiz_id', id).order('email'))
       setQuiz(q)
       setQs(questions)
@@ -58,6 +58,18 @@ export default function Results() {
 
   const submitted = useMemo(() => rows.filter((r) => r.status === 'submitted'), [rows])
   const total = quiz ? qs.length * Number(quiz.marks_correct) : 0
+  // Rank counts students with a higher score, like the student sees it.
+  const rankOf = useMemo(() => {
+    const scores = submitted.map((r) => Number(r.score))
+    const m = new Map()
+    for (const r of submitted) m.set(r.id, 1 + scores.filter((x) => x > Number(r.score)).length)
+    return m
+  }, [submitted])
+  const pctOf = (r) => {
+    if (!rankOf.has(r.id)) return null
+    const me = Number(r.score)
+    return (100 * submitted.filter((x) => Number(x.score) <= me).length) / submitted.length
+  }
   const notStarted = useMemo(() => {
     const joined = new Set(rows.map((r) => r.email.toLowerCase()))
     return invites.filter((e) => !joined.has(e))
@@ -70,6 +82,7 @@ export default function Results() {
       if (sort.key === 'score') return r.score == null ? null : Number(r.score)
       if (sort.key === 'correct') return r.correct
       if (sort.key === 'time') return r.time_taken_seconds
+      if (sort.key === 'tabs') return r.tab_switches ?? 0
       return null
     }
     return [...rows].sort((a, b) => {
@@ -89,13 +102,17 @@ export default function Results() {
     let right = 0
     let wrong = 0
     let skipped = 0
+    let tSum = 0
+    let tN = 0
     for (const r of submitted) {
       const g = r.graded?.[q.id]
       if (g === true) right += 1
       else if (g === false) wrong += 1
       else skipped += 1
+      const t = r.times?.[q.id]
+      if (t != null) { tSum += Number(t); tN += 1 }
     }
-    return { q, right, wrong, skipped }
+    return { q, right, wrong, skipped, avgTime: tN ? tSum / tN : null }
   }), [qs, submitted])
 
   if (err && !quiz) return <main className="page"><p className="error" role="alert">{err}</p></main>
@@ -115,13 +132,15 @@ export default function Results() {
   const linkFor = (r) => `${window.location.origin}/q/${quiz.code}?a=${r.id}&t=${r.token}`
 
   function exportCsv() {
-    const head = ['Name', 'Email', 'Status', 'Score', 'Correct', 'Wrong', 'Unattempted', 'Time taken (seconds)', 'Submitted at', 'How it ended', 'Result link', ...qs.map((_, i) => `Q${i + 1}`)]
+    const head = ['Name', 'Email', 'Status', 'Rank', 'Percentile', 'Score', 'Correct', 'Wrong', 'Unattempted', 'Time taken (seconds)', 'Tab switches', 'Seconds away', 'Submitted at', 'How it ended', 'Result link',
+      ...qs.map((_, i) => `Q${i + 1}`), ...qs.map((_, i) => `Q${i + 1} seconds`)]
     const body = sorted.map((r) => [
-      r.name, r.email, r.status, r.score ?? '', r.correct ?? '', r.wrong ?? '', r.unattempted ?? '',
-      r.time_taken_seconds ?? '', r.submitted_at ?? '', r.submit_reason ?? '', linkFor(r),
-      ...qs.map((q) => givenText(q, r.answers?.[q.id])),
+      r.name, r.email, r.status, rankOf.get(r.id) ?? '', pctOf(r) == null ? '' : Math.round(pctOf(r) * 100) / 100,
+      r.score ?? '', r.correct ?? '', r.wrong ?? '', r.unattempted ?? '',
+      r.time_taken_seconds ?? '', r.tab_switches ?? 0, r.away_seconds ?? 0, r.submitted_at ?? '', r.submit_reason ?? '', linkFor(r),
+      ...qs.map((q) => givenText(q, r.answers?.[q.id])), ...qs.map((q) => r.times?.[q.id] ?? ''),
     ])
-    const key = ['Answer key', '', '', '', '', '', '', '', '', '', '', ...qs.map((q) => keyText(q))]
+    const key = ['Answer key', '', '', '', '', '', '', '', '', '', '', '', '', '', '', ...qs.map((q) => keyText(q))]
     downloadCsv(`${quiz.code}-results.csv`, [head, key, ...body])
   }
 
@@ -176,6 +195,7 @@ export default function Results() {
             <table className="t">
               <thead>
                 <tr>
+                  <th className="n">#</th>
                   <th><button onClick={() => sortBy('name')}>Name{arrow('name')}</button></th>
                   <th>Email</th>
                   <th className="n"><button onClick={() => sortBy('score')}>Score{arrow('score')}</button></th>
@@ -183,6 +203,7 @@ export default function Results() {
                   <th className="n">Wrong</th>
                   <th className="n">Skipped</th>
                   <th className="n"><button onClick={() => sortBy('time')}>Time{arrow('time')}</button></th>
+                  <th className="n"><button onClick={() => sortBy('tabs')}>Tabs{arrow('tabs')}</button></th>
                   <th>Status</th>
                   <th />
                 </tr>
@@ -191,13 +212,17 @@ export default function Results() {
                 {sorted.map((r) => (
                   <Fragment key={r.id}>
                     <tr>
-                      <td><b>{r.name}</b>{r.link_requested_at && <span className="chip">Asked for link</span>}</td>
+                      <td className="n">{rankOf.get(r.id) ?? '-'}</td>
+                      <td><Link to={`/admin/students/${encodeURIComponent(r.email.toLowerCase())}`}><b>{r.name}</b></Link>{r.link_requested_at && <span className="chip">Asked for link</span>}</td>
                       <td className="muted">{r.email}</td>
                       <td className="n"><b>{num(r.score)}</b></td>
                       <td className="n">{r.correct ?? '-'}</td>
                       <td className="n">{r.wrong ?? '-'}</td>
                       <td className="n">{r.unattempted ?? '-'}</td>
                       <td className="n">{r.time_taken_seconds == null ? '-' : spoken(r.time_taken_seconds)}</td>
+                      <td className="n" title={r.away_seconds ? `${spoken(r.away_seconds)} away from the quiz tab` : 'Stayed on the quiz tab'}>
+                        {r.tab_switches ? <span className={r.away_seconds >= 60 ? 'noc' : ''}>{r.tab_switches}<small className="muted"> · {spoken(r.away_seconds)}</small></span> : '0'}
+                      </td>
                       <td>
                         {r.status === 'in_progress' ? 'In progress'
                           : r.submit_reason === 'manual' ? 'Submitted'
@@ -220,13 +245,14 @@ export default function Results() {
                     </tr>
                     {open.has(r.id) && (
                       <tr>
-                        <td colSpan={9}>
+                        <td colSpan={11}>
                           <div className="answersheet">
                             {qs.map((q, i) => {
                               const a = r.answers?.[q.id]
                               const g = r.graded?.[q.id]
                               const cls = g === true ? 'r' : g === false ? 'w' : ''
-                              return <span key={q.id} className={cls}>Q{i + 1} {a == null ? '-' : givenText(q, a)}{g === false ? ` (${keyText(q)})` : ''}</span>
+                              const t = r.times?.[q.id]
+                              return <span key={q.id} className={cls}>Q{i + 1} {a == null ? '-' : givenText(q, a)}{g === false ? ` (${keyText(q)})` : ''}{t != null && <small className="muted"> {spoken(t)}</small>}</span>
                             })}
                           </div>
                         </td>
@@ -257,14 +283,14 @@ export default function Results() {
       {submitted.length > 0 && (
         <section className="block">
           <h2>By question</h2>
-          <p className="muted" style={{ marginBottom: 12 }}>Share of submitted students who got each question right.</p>
+          <p className="muted" style={{ marginBottom: 12 }}>Share of submitted students who got each question right, and the average time spent on it. To fix a key or make a question a bonus, open the quiz and use Change answer key.</p>
           <div className="tablewrap">
             <table className="t">
               <thead>
-                <tr><th>Question</th><th>Right</th><th className="n">Wrong</th><th className="n">Skipped</th><th>Correct answer</th></tr>
+                <tr><th>Question</th><th>Right</th><th className="n">Wrong</th><th className="n">Skipped</th><th className="n">Avg time</th><th>Correct answer</th></tr>
               </thead>
               <tbody>
-                {analysis.map(({ q, right, wrong, skipped }, i) => {
+                {analysis.map(({ q, right, wrong, skipped, avgTime }, i) => {
                   const pct = Math.round((right / submitted.length) * 100)
                   return (
                     <tr key={q.id}>
@@ -272,6 +298,7 @@ export default function Results() {
                       <td><div className="bar-cell"><div className="meter"><i style={{ width: `${pct}%` }} /></div><span>{pct}%</span></div></td>
                       <td className="n">{wrong}</td>
                       <td className="n">{skipped}</td>
+                      <td className="n">{avgTime == null ? '-' : spoken(avgTime)}</td>
                       <td>{keyText(q)}</td>
                     </tr>
                   )
