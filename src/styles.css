@@ -384,3 +384,27 @@ section.block > h2 { margin-bottom: 16px; }
 .livebanner .lbtext { flex: 1; min-width: 200px; }
 .livebanner .lbgo { font-weight: 700; text-decoration: underline; text-underline-offset: 3px; white-space: nowrap; }
 @media (prefers-reduced-motion: reduce) { .livedot { animation: none; } }
+
+/* admin quiz list rows */
+.alist { list-style: none; margin: 0; padding: 0; }
+.alist li { display: grid; grid-template-columns: minmax(0, 1fr) 90px 150px auto; gap: 8px 20px; align-items: center; padding: 14px 4px 14px 16px; border-top: 1px solid var(--rule); }
+.libstrip .alist li { padding-left: 0; border-top-color: rgba(0, 0, 0, 0.08); }
+.libstrip .alist li:first-child { border-top: 0; }
+.alist .amain { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
+.alist .amain a b { overflow-wrap: anywhere; }
+.alist .codechip.small { font-size: 0.85rem; letter-spacing: 0.1em; color: var(--ink); }
+.alist .achips { display: flex; flex-wrap: wrap; gap: 6px; }
+.alist .achips:empty { display: none; }
+.alist .aact { display: flex; gap: 16px; white-space: nowrap; }
+@media (max-width: 760px) {
+  .alist li { grid-template-columns: minmax(0, 1fr) auto; }
+  .alist .adate { display: none; }
+  .alist .aact { grid-column: 1 / -1; }
+}
+
+/* narrow phones: keep the top bar on one screen width */
+@media (max-width: 480px) {
+  .bar { flex-wrap: wrap; row-gap: 6px; }
+  .bar nav { gap: 14px; font-size: 0.95rem; }
+  .brand span { display: none; }
+}
