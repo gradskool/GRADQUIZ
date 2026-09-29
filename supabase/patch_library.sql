@@ -1,8 +1,8 @@
 -- GRADQUIZ patch: student library. Run once in the Supabase SQL Editor. Safe to run again.
 -- Each quiz can have a batch and a topic, and can be shown in the library.
--- A student belongs to every batch of any quiz they have attempted, so there is no roster to keep.
--- The library shows, for those batches: live quizzes (can attempt), scheduled ones (coming up),
--- and ended ones (their result, or "missed"). Nobody can attempt an ended quiz from here.
+-- Any student who has found themselves (a valid attempt secret on their device) sees every library quiz,
+-- tabbed by batch: live quizzes (can attempt), scheduled ones (coming up), and ended ones (their result,
+-- or "missed"). Invited only quizzes show only to invited emails. Nobody can attempt an ended quiz from here.
 
 alter table public.quizzes add column if not exists batch text;
 alter table public.quizzes add column if not exists topic text;
@@ -77,7 +77,7 @@ begin
             order by m.started_at desc limit 1))
         order by coalesce(z.started_at, z.starts_at, z.created_at) desc)
       from quizzes z
-      where z.in_library and z.batch is not null and lower(z.batch) = any (coalesce(v_batches, '{}'))
+      where z.in_library and z.batch is not null
         and (z.status in ('live', 'ended') or (z.status = 'draft' and z.starts_at is not null))
         and (z.access = 'open'
              or exists (select 1 from quiz_invites i where i.quiz_id = z.id and i.email = any (v_emails))

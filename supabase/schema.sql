@@ -1799,7 +1799,7 @@ begin
             order by m.started_at desc limit 1))
         order by coalesce(z.started_at, z.starts_at, z.created_at) desc)
       from quizzes z
-      where z.in_library and z.batch is not null and lower(z.batch) = any (coalesce(v_batches, '{}'))
+      where z.in_library and z.batch is not null
         and (z.status in ('live', 'ended') or (z.status = 'draft' and z.starts_at is not null))
         and (z.access = 'open'
              or exists (select 1 from quiz_invites i where i.quiz_id = z.id and i.email = any (v_emails))

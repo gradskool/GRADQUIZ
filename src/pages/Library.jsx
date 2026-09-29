@@ -1,5 +1,5 @@
-import { useEffect, useMemo, useState } from 'react'
-import { Link } from 'react-router-dom'
+import { useCallback, useEffect, useMemo, useState } from 'react'
+import { Link, useSearchParams } from 'react-router-dom'
 import Brand from '../components/Brand.jsx'
 import { rpc } from '../lib/supabase.js'
 import { formatWhen, num } from '../lib/util.js'
@@ -29,31 +29,79 @@ const stateOf = (q) => {
 }
 
 export default function Library() {
+  const [params, setParams] = useSearchParams()
   const [data, setData] = useState(null)
   const [err, setErr] = useState('')
   const [batch, setBatch] = useState(() => { try { return localStorage.getItem('gradquiz:lib:batch') || '' } catch { return '' } })
+  // 'live' or a batch name. Null until the data arrives, then it opens on Live now when anything is live.
+  const [tab, setTab] = useState(null)
   const [filter, setFilter] = useState('all')
   const [q, setQ] = useState('')
   const [openTopics, setOpenTopics] = useState(() => new Set())
+  const highlight = (params.get('q') || '').toUpperCase()
 
-  useEffect(() => {
+  const load = useCallback(() => {
     const saved = readSaved()
     if (saved.length === 0) { setData({ emails: [], quizzes: [] }); return }
-    rpc('my_library', { p_items: saved }).then(setData).catch((e) => setErr(e.message))
+    rpc('my_library', { p_items: saved }).then((d) => { setData(d); setErr('') }).catch((e) => setErr(e.message))
   }, [])
+  useEffect(() => { load() }, [load])
+  // quizzes start and end during class, so check again every minute
+  useEffect(() => {
+    const t = setInterval(load, 60000)
+    return () => clearInterval(t)
+  }, [load])
+
+  const all = data?.quizzes || []
+  const liveAll = all
+    .filter((x) => ['live', 'progress'].includes(stateOf(x)))
+    .sort((a, b) => (stateOf(a) === 'progress' ? -1 : 0) - (stateOf(b) === 'progress' ? -1 : 0) || String(b.opened_at).localeCompare(String(a.opened_at)))
+  const soonAll = all.filter((x) => stateOf(x) === 'soon').sort((a, b) => String(a.starts_at).localeCompare(String(b.starts_at)))
+  const hasLiveTab = liveAll.length > 0 || soonAll.length > 0
 
   const batches = useMemo(() => {
     const m = new Map()
-    for (const x of data?.quizzes || []) m.set(x.batch.toLowerCase(), x.batch)
+    for (const x of all) m.set(x.batch.toLowerCase(), x.batch)
     return [...m.values()].sort((a, b) => a.localeCompare(b))
-  }, [data])
+  }, [all])
+  // "CAT 2026- Algebra", "CAT 2026- Geometry" share "CAT 2026- ": show it once above the tabs
+  const common = useMemo(() => {
+    if (batches.length < 2) return ''
+    let pre = batches[0]
+    for (const b of batches) while (pre && !b.startsWith(pre)) pre = pre.slice(0, -1)
+    const cut = pre.search(/[\s\-–—:|/›>]+[^\s\-–—:|/›>]*$/)
+    pre = cut >= 0 ? pre.slice(0, pre.length - pre.slice(cut).replace(/^[\s\-–—:|/›>]+/, '').length) : ''
+    return batches.every((b) => b.length > pre.length) && /\S/.test(pre) ? pre : ''
+  }, [batches])
+  const short = (b) => (common ? b.slice(common.length) : b)
   const current = batches.find((b) => b.toLowerCase() === batch.toLowerCase()) || batches[0] || ''
-  useEffect(() => { try { if (current) localStorage.setItem('gradquiz:lib:batch', current) } catch { /* ignore */ } }, [current])
 
-  const inBatch = useMemo(() => (data?.quizzes || []).filter((x) => x.batch.toLowerCase() === current.toLowerCase()), [data, current])
-  const liveNow = inBatch.filter((x) => ['live', 'progress'].includes(stateOf(x)))
-  const soon = inBatch.filter((x) => stateOf(x) === 'soon').sort((a, b) => String(a.starts_at).localeCompare(String(b.starts_at)))
+  // pick the opening tab once data is in; fall back to a batch when the Live now tab disappears
+  useEffect(() => {
+    if (!data) return
+    if (tab === null) setTab(hasLiveTab && (params.get('tab') === 'live' || liveAll.length > 0) ? 'live' : 'batch')
+    else if (tab === 'live' && !hasLiveTab) setTab('batch')
+  }, [data, hasLiveTab]) // eslint-disable-line react-hooks/exhaustive-deps
+  const onLive = tab === 'live' && hasLiveTab
 
+  function pickBatch(b) {
+    setBatch(b)
+    setTab('batch')
+    try { localStorage.setItem('gradquiz:lib:batch', b) } catch { /* ignore */ }
+    if (params.get('tab') || params.get('q')) setParams({}, { replace: true })
+  }
+  function pickLive() {
+    setTab('live')
+  }
+
+  // bring the quiz from the home page banner into view
+  useEffect(() => {
+    if (!onLive || !highlight) return
+    const el = document.getElementById(`live-${highlight}`)
+    if (el) el.scrollIntoView({ behavior: 'smooth', block: 'center' })
+  }, [onLive, highlight, data])
+
+  const inBatch = useMemo(() => all.filter((x) => x.batch.toLowerCase() === current.toLowerCase()), [all, current])
   const shown = inBatch.filter((x) => {
     const s = stateOf(x)
     if (filter === 'done' && s !== 'done') return false
@@ -83,6 +131,8 @@ export default function Library() {
   const toggle = (name) => setOpenTopics((s) => { const n = new Set(s); n.has(name) ? n.delete(name) : n.add(name); return n })
   const doneAll = inBatch.filter((x) => stateOf(x) === 'done').length
   const missedAll = inBatch.filter((x) => stateOf(x) === 'missed').length
+  const liveInBatch = inBatch.filter((x) => ['live', 'progress'].includes(stateOf(x))).length
+  const where = (x) => `${short(x.batch)} › ${x.topic}`
 
   return (
     <>
@@ -111,51 +161,66 @@ export default function Library() {
           <>
             <p className="muted" style={{ marginTop: 10 }}>{data.emails.join(', ')}</p>
 
-            {batches.length > 1 && (
-              <div className="kinds libtabs" role="tablist" aria-label="Batch" style={{ marginTop: 24 }}>
-                {batches.map((b) => (
-                  <button key={b} type="button" role="tab" aria-selected={b === current} aria-checked={b === current} onClick={() => setBatch(b)}>{b}</button>
-                ))}
-              </div>
-            )}
-            {batches.length === 1 && <p className="qmeta" style={{ marginTop: 20 }}>{current}</p>}
+            {common && <p className="qmeta" style={{ marginTop: 24 }}>{common.replace(/[\s\-–—:|/›>]+$/, '')}</p>}
+            <div className="libtabs" role="tablist" aria-label="Library" style={{ marginTop: common ? 8 : 24 }}>
+              {hasLiveTab && (
+                <button type="button" role="tab" className="libtab livetab" aria-selected={onLive} onClick={pickLive}>
+                  {liveAll.length > 0
+                    ? <><span className="livedot" aria-hidden="true" />Live now ({liveAll.length})</>
+                    : <>Starting soon ({soonAll.length})</>}
+                </button>
+              )}
+              {batches.map((b) => (
+                <button key={b} type="button" role="tab" className="libtab" aria-selected={!onLive && b === current} onClick={() => pickBatch(b)} title={b}>
+                  {short(b)}
+                </button>
+              ))}
+            </div>
 
-            <p className="muted small" style={{ marginTop: 12 }}>
-              {doneAll} done{missedAll ? `, ${missedAll} missed` : ''}{liveNow.length ? `, ${liveNow.length} live now` : ''} in this batch.
-            </p>
-
-            {liveNow.length > 0 && (
-              <section className="libstrip">
-                <h2>Live now</h2>
-                <ul>
-                  {liveNow.map((x) => (
-                    <li key={x.code}>
-                      <div>
-                        <b>{x.title}</b>
-                        <span className="muted small">{x.topic} · {x.question_count} questions · {x.duration_minutes} min{x.ends_at ? ` · entry closes ${formatWhen(x.ends_at)}` : ''}</span>
-                      </div>
-                      <Link className="btn small" to={`/q/${x.code}`}>{stateOf(x) === 'progress' ? 'Continue' : 'Start'}</Link>
-                    </li>
-                  ))}
-                </ul>
-              </section>
-            )}
-            {soon.length > 0 && (
-              <section className="libstrip soon">
-                <h2>Coming up</h2>
-                <ul>
-                  {soon.slice(0, 3).map((x) => (
-                    <li key={x.code}>
-                      <div>
-                        <b>{x.title}</b>
-                        <span className="muted small">{x.topic} · starts {formatWhen(x.starts_at)}</span>
-                      </div>
-                    </li>
-                  ))}
-                </ul>
-                {soon.length > 3 && <p className="muted small">and {soon.length - 3} more</p>}
-              </section>
-            )}
+            {onLive ? (
+              <>
+                {liveAll.length > 0 && (
+                  <section className="libstrip">
+                    <h2>Live now</h2>
+                    <ul>
+                      {liveAll.map((x) => (
+                        <li key={x.code} id={`live-${x.code}`} className={x.code === highlight ? 'hl' : ''}>
+                          <div>
+                            <b>{x.title}</b>
+                            <span className="muted small">
+                              {where(x)} · {x.question_count} questions · {x.duration_minutes} min{x.ends_at ? ` · entry closes ${formatWhen(x.ends_at)}` : ''}
+                            </span>
+                          </div>
+                          <Link className="btn small" to={`/q/${x.code}`}>{stateOf(x) === 'progress' ? 'Continue' : 'Start'}</Link>
+                        </li>
+                      ))}
+                    </ul>
+                  </section>
+                )}
+                {liveAll.length === 0 && <p className="muted" style={{ marginTop: 24 }}>Nothing is live right now.</p>}
+                {soonAll.length > 0 && (
+                  <section className="libstrip soon">
+                    <h2>Starting soon</h2>
+                    <ul>
+                      {soonAll.map((x) => (
+                        <li key={x.code}>
+                          <div>
+                            <b>{x.title}</b>
+                            <span className="muted small">{where(x)} · {x.question_count} questions · {x.duration_minutes} min</span>
+                          </div>
+                          <span className="small soonat">Starts {formatWhen(x.starts_at)}</span>
+                        </li>
+                      ))}
+                    </ul>
+                  </section>
+                )}
+                <p className="muted small" style={{ marginTop: 16 }}>This list refreshes every minute.</p>
+              </>
+            ) : (
+              <>
+                <p className="muted small" style={{ marginTop: 12 }}>
+                  {doneAll} done{missedAll ? `, ${missedAll} missed` : ''}{liveInBatch ? `, ${liveInBatch} live now` : ''} in this batch.
+                </p>
 
             <section className="block">
               <div className="row between" style={{ alignItems: 'flex-end' }}>
@@ -198,6 +263,8 @@ export default function Library() {
                 })}
               </div>
             </section>
+              </>
+            )}
           </>
         )}
       </main>

@@ -112,7 +112,7 @@ On the home page, Your results shows Your progress: quizzes taken, average perce
 
 ## Student library
 
-Give each quiz a Batch and a Topic in Settings, and leave "Show in the students' library" on. Students open Your library from the home page. They see their batches (a student belongs to every batch of a quiz they attempted), with Live now, Coming up, and topics collapsed with "x of y done". Done quizzes open their result (and practice if on), missed ones show as missed, and ended quizzes cannot be attempted. A new device first needs Find all my results with email and PIN. Run `supabase/patch_library.sql` once.
+Give each quiz a Batch and a Topic in Settings, and leave "Show in the students' library" on. Students open Your library from the home page. They see every batch as a tab, with topics collapsed with "x of y done". Done quizzes open their result (and practice if on), missed ones show as missed, and ended quizzes cannot be attempted. A new device first needs Find all my results with email and PIN. When anything is live or scheduled, a Live now tab comes first and opens by default, listing live quizzes from every batch (Start from there) and Starting soon. The home page shows a Live now banner that links to it. Both refresh every minute. Run `supabase/patch_library.sql` once.
 
 ## Paste format for many questions
 

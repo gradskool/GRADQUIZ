@@ -55,6 +55,21 @@ export default function Home() {
   const [askErr, setAskErr] = useState('')
   const box = useRef(null)
   const [progress, setProgress] = useState([])
+  const [live, setLive] = useState([])
+
+  // Quizzes live right now for this student, for the banner. Checked again every minute.
+  useEffect(() => {
+    const check = () => {
+      const saved = readSaved()
+      if (saved.length === 0) return
+      rpc('my_library', { p_items: saved.map((x) => ({ a: x.a, t: x.t })) })
+        .then((d) => setLive((d?.quizzes || []).filter((x) => x.status === 'live' && x.mine?.status !== 'submitted')))
+        .catch(() => { /* no banner */ })
+    }
+    check()
+    const t = setInterval(check, 60000)
+    return () => clearInterval(t)
+  }, [])
 
   // Overall numbers for every attempt this device holds. Only attempts whose secret matches come back.
   const loadProgress = () => {
@@ -153,6 +168,17 @@ export default function Home() {
         <nav><Link to="/library">Your library</Link></nav>
       </header>
       <main className="page">
+        {live.length > 0 && (
+          <Link className="livebanner" to={`/library?tab=live${live.length === 1 ? `&q=${live[0].code}` : ''}`}>
+            <span className="livedot" aria-hidden="true" />
+            <span className="lbtext">
+              {live.length === 1
+                ? <><b>Live now:</b> {live[0].title}</>
+                : <><b>{live.length} quizzes live now:</b> {live.slice(0, 2).map((x) => x.title).join(', ')}{live.length > 2 ? ` and ${live.length - 2} more` : ''}</>}
+            </span>
+            <span className="lbgo">Go to Live now →</span>
+          </Link>
+        )}
         <div className="hero">
           <h1>Enter your quiz code.</h1>
           <p className="lede">Your instructor shares it in class. It is 6 letters and numbers.</p>
