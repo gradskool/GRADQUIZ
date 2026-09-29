@@ -2,6 +2,37 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useParams, useSearchParams } from 'react-router-dom'
 import Brand from '../components/Brand.jsx'
 import MathText from '../components/MathText.jsx'
+import RichText from '../components/RichText.jsx'
+
+// Moving to another question starts it at the top of the screen. Inside the same set on a phone,
+// skip past the passage (already read) to the question.
+function useQuestionScroll(idx, qs) {
+  const prev = useRef(idx)
+  useEffect(() => {
+    const was = prev.current
+    prev.current = idx
+    if (was === idx) return
+    const q = qs[idx]
+    const pane = q?.set_no && qs[was]?.set_no === q.set_no && window.innerWidth <= 1100 ? document.querySelector('.qpane') : null
+    window.scrollTo(0, pane ? Math.max(0, pane.getBoundingClientRect().top + window.scrollY - 80) : 0)
+  }, [idx, qs])
+}
+
+// An LRDI set: the shared passage sits beside the question on wide screens and above it on phones.
+function SetWrap({ q, qs, children }) {
+  if (!q.set_body) return children
+  const nums = qs.map((x, k) => (x.set_no === q.set_no ? k + 1 : 0)).filter(Boolean)
+  const range = nums.length > 1 && nums[nums.length - 1] - nums[0] === nums.length - 1 ? `Questions ${nums[0]} to ${nums[nums.length - 1]}` : `${nums.length} questions`
+  return (
+    <div className="setsplit">
+      <section className="setpane" aria-label="Set passage">
+        <p className="qmeta">Set · {range}</p>
+        <RichText className="setbody" style={{ whiteSpace: 'pre-wrap' }} text={q.set_body} />
+      </section>
+      <div className="qpane">{children}</div>
+    </div>
+  )
+}
 import { rpc, sendQuizCode, toAppError } from '../lib/supabase.js'
 import { LETTERS, clock, formatWhen, num, spoken } from '../lib/util.js'
 
@@ -22,6 +53,12 @@ const allSaved = () => {
     }
   } catch { /* private mode */ }
   return out
+}
+// Devices this browser has proved with an emailed code, per email (listed-students programs that ask for it).
+const DEV_KEY = 'gradquiz:devices'
+const deviceFor = (email) => { try { return (JSON.parse(localStorage.getItem(DEV_KEY)) || {})[email] || null } catch { return null } }
+const saveDevice = (email, token) => {
+  try { const m = JSON.parse(localStorage.getItem(DEV_KEY)) || {}; m[email] = token; localStorage.setItem(DEV_KEY, JSON.stringify(m)) } catch { /* private mode */ }
 }
 const loadMe = () => { try { return JSON.parse(localStorage.getItem('gradquiz:me')) || {} } catch { return {} } }
 const saveMe = (v) => { try { localStorage.setItem('gradquiz:me', JSON.stringify(v)) } catch { /* private mode */ } }
@@ -216,6 +253,9 @@ function Lobby({ code, info, setInfo, onStarted, onFound, onPractice }) {
   const [fErr, setFErr] = useState('')
   const [fBusy, setFBusy] = useState(false)
   const invited = info.access === 'invited'
+  const verify = Boolean(info.verify_device)
+  const [needCode, setNeedCode] = useState(false) // this device is new for this email
+  const codeMode = invited || needCode
   const [sentTo, setSentTo] = useState('') // the email the code went to
   const [otp, setOtp] = useState('')
   const [sending, setSending] = useState(false)
@@ -304,15 +344,26 @@ function Lobby({ code, info, setInfo, onStarted, onFound, onPractice }) {
     e.preventDefault()
     setErr('')
     if (invited && !sentTo) return sendCode()
-    if (!/^[0-9]{4,6}$/.test(pin.trim())) return setErr('Choose a PIN with 4 to 6 digits.')
-    if (invited && !/^[0-9]{6}$/.test(otp.trim())) return setErr('Type the 6 digit code from your email.')
+    const problem = formProblem()
+    if (problem) return setErr(problem)
+    if (codeMode && !/^[0-9]{6}$/.test(otp.trim())) return setErr('Type the 6 digit code from your email.')
     setBusy(true)
     try {
-      const args = { p_code: code, p_name: name, p_email: invited ? sentTo : email, p_pin: pin.trim() }
-      if (invited) args.p_otp = otp.trim()
+      const who = (codeMode ? sentTo : email).trim().toLowerCase()
+      const args = { p_code: code, p_name: name, p_email: who, p_pin: pin.trim() }
+      if (codeMode) args.p_otp = otp.trim()
+      if (verify && deviceFor(who)) args.p_device = deviceFor(who)
       const st = await rpc('start_attempt', args)
+      if (st?.error === 'NEED_CODE') {
+        // first time on this device for this email: email a code, then Start again with it
+        setNeedCode(true)
+        setBusy(false)
+        await sendCode()
+        return
+      }
       if (st?.error) throw toAppError(st.error)
-      onStarted(st, { name: name.trim(), email: args.p_email.trim().toLowerCase() })
+      if (st.device_token) saveDevice(who, st.device_token)
+      onStarted(st, { name: name.trim(), email: who })
     } catch (ex) {
       setErr(ex.message)
       if (ex.code === 'QUIZ_ENDED' || ex.code === 'QUIZ_NOT_STARTED') {
@@ -344,6 +395,11 @@ function Lobby({ code, info, setInfo, onStarted, onFound, onPractice }) {
         <li>Unattempted questions score 0</li>
       </ul>
       {info.instructions && <p style={{ whiteSpace: 'pre-wrap' }}>{info.instructions}</p>}
+      {info.roster_only && info.status !== 'ended' && (
+        <div className="notice plain" role="note">
+          This quiz is only for registered <b>{info.program}</b> students. Use the email your instructor has for you.
+        </div>
+      )}
 
       {info.status === 'draft' && (
         <div className="notice plain waiting" role="status">
@@ -382,7 +438,7 @@ function Lobby({ code, info, setInfo, onStarted, onFound, onPractice }) {
             </label>
             <label className="field">
               <span>Email</span>
-              <input className="input" type="email" value={email} onChange={(e) => setEmail(e.target.value)} autoComplete="email" inputMode="email" required readOnly={Boolean(sentTo)} />
+              <input className="input" type="email" value={email} onChange={(e) => setEmail(e.target.value)} autoComplete="email" inputMode="email" required readOnly={Boolean(sentTo) && codeMode} />
             </label>
           </div>
           <label className="field" style={{ maxWidth: 260 }}>
@@ -390,15 +446,21 @@ function Lobby({ code, info, setInfo, onStarted, onFound, onPractice }) {
             <input className="input" value={pin} onChange={(e) => setPin(e.target.value.replace(/\D/g, '').slice(0, 6))} inputMode="numeric" autoComplete="off" maxLength={6} placeholder="4 to 6 digits" required />
             <small>Choose a PIN you will remember. With your email it lets you see your result again later. Do not use a phone number.</small>
           </label>
-          {invited && sentTo && (
+          {needCode && sentTo && (
+            <div className="notice plain" role="status">
+              First time on this device with <b>{sentTo}</b>. We emailed a 6 digit code to confirm it is you. After this, this device will not need a code for 60 days.
+            </div>
+          )}
+          {codeMode && sentTo && (
             <label className="field" style={{ maxWidth: 260 }}>
               <span>Code from your email</span>
               <input className="input codechip" value={otp} onChange={(e) => setOtp(e.target.value.replace(/\D/g, '').slice(0, 6))} inputMode="numeric" autoComplete="one-time-code" maxLength={6} placeholder="6 digits" autoFocus />
             </label>
           )}
-          {invited && sentNote && <p className="muted small" role="status">{sentNote}</p>}
+          {codeMode && sentNote && <p className="muted small" role="status">{sentNote}</p>}
           <p className="muted small">
             {invited && !sentTo && 'This quiz is only for invited students. We will email you a code to confirm it is you. '}
+            {verify && !needCode && 'The first time you use a new phone or computer, we email you a code to confirm it is you. '}
             Your timer starts when you press Start. You can attempt this quiz once. If the page closes, reopen this link on the same device to continue.
             {' '}Time spent on each question and switching away from this tab are recorded.
           </p>
@@ -409,12 +471,12 @@ function Lobby({ code, info, setInfo, onStarted, onFound, onPractice }) {
             ) : (
               <button className="btn" disabled={busy}>{busy ? 'Starting' : 'Start quiz'}</button>
             )}
-            {invited && sentTo && (
+            {codeMode && sentTo && (
               <>
                 <button type="button" className="link" onClick={sendCode} disabled={sending || wait > 0}>
                   {sending ? 'Sending' : wait > 0 ? `Resend code in ${wait}s` : 'Resend code'}
                 </button>
-                <button type="button" className="link" onClick={() => { setSentTo(''); setOtp(''); setSentNote(''); setErr('') }}>Change email</button>
+                <button type="button" className="link" onClick={() => { setSentTo(''); setOtp(''); setSentNote(''); setErr(''); setNeedCode(false) }}>Change email</button>
               </>
             )}
           </div>
@@ -458,6 +520,7 @@ function Exam({ init, creds, onDone }) {
   const qs = init.questions
   const [answers, setAnswers] = useState(init.answers || {})
   const [idx, setIdx] = useState(0)
+  useQuestionScroll(idx, qs)
   const [left, setLeft] = useState(() => new Date(init.deadline).getTime() - new Date(init.server_now).getTime())
   const [sync, setSync] = useState('saved')
   const [confirm, setConfirm] = useState(false)
@@ -694,13 +757,14 @@ function Exam({ init, creds, onDone }) {
         </div>
       </header>
 
-      <div className="examgrid">
+      <div className={`examgrid ${qs.some((x) => x.set_body) ? 'wide' : ''}`}>
         <main>
           <p className="qmeta">
             Question {idx + 1} of {qs.length}
             {marked && <span className="markflag">Marked for review</span>}
           </p>
-          <MathText as="h2" className="qbody" style={{ fontWeight: 400 }} text={q.body} />
+          <SetWrap q={q} qs={qs}>
+          <RichText as="h2" className="qbody" style={{ fontWeight: 400 }} text={q.body} />
           {q.kind === 'tita' ? (
             <div className="typein">
               <label className="sr" htmlFor={`ti-${q.id}`}>Your answer</label>
@@ -736,6 +800,7 @@ function Exam({ init, creds, onDone }) {
             </div>
           )}
 
+          </SetWrap>
           <div className="qnav">
             <button className="btn ghost" onClick={() => setIdx(idx - 1)} disabled={idx === 0}>Previous</button>
             <button className="btn ghost markbtn" onClick={toggleMark}>{marked ? 'Unmark' : idx === qs.length - 1 ? 'Mark for review' : 'Mark for review & next'}</button>
@@ -993,13 +1058,19 @@ function Review({ data, onBack, heading = 'Review', backLabel = 'Back to result'
 
       <div style={{ marginTop: 16 }}>
         {shown.length === 0 && <p className="muted" style={{ marginTop: 24 }}>Nothing here.</p>}
-        {shown.map(({ it, i }) => (
+        {shown.map(({ it, i }, n) => (
           <article className="rv" key={it.id}>
             <p className="qmeta">
               Question {i + 1}
               <span className={`verdict ${kind(it)}`}>{it.bonus ? 'Bonus, full marks to everyone' : label[kind(it)]}</span>
             </p>
-            <MathText as="h2" className="qbody" style={{ fontWeight: 400 }} text={it.body} />
+            {it.set_body && it.set_no !== shown[n - 1]?.it.set_no && (
+              <details className="setreview" open>
+                <summary>Set passage</summary>
+                <RichText className="setbody" style={{ whiteSpace: 'pre-wrap' }} text={it.set_body} />
+              </details>
+            )}
+            <RichText as="h2" className="qbody" style={{ fontWeight: 400 }} text={it.body} />
 
             {it.kind === 'mcq' ? (
               <ul className="rvopts">
@@ -1033,7 +1104,7 @@ function Review({ data, onBack, heading = 'Review', backLabel = 'Back to result'
             )}
 
             {it.explanation && (
-              <div className="expl"><b>Explanation</b><MathText as="p" text={it.explanation} /></div>
+              <div className="expl"><b>Explanation</b><RichText as="p" text={it.explanation} /></div>
             )}
           </article>
         ))}
@@ -1050,6 +1121,7 @@ function Practice({ code, creds, backLabel, onExit }) {
   const [err, setErr] = useState('')
   const [answers, setAnswers] = useState(() => { try { return JSON.parse(localStorage.getItem(key)) || {} } catch { return {} } })
   const [idx, setIdx] = useState(0)
+  useQuestionScroll(idx, data?.questions || [])
   const [result, setResult] = useState(null)
   const [busy, setBusy] = useState(false)
   const [startedAt, setStartedAt] = useState(() => Date.now())
@@ -1149,10 +1221,11 @@ function Practice({ code, creds, backLabel, onExit }) {
           <span className="timer" role="timer" aria-label="Time so far">{clock((now - startedAt) / 1000)}</span>
         </div>
       </header>
-      <div className="examgrid">
+      <div className={`examgrid ${qs.some((x) => x.set_body) ? 'wide' : ''}`}>
         <main>
           <p className="qmeta">Question {idx + 1} of {qs.length}</p>
-          <MathText as="h2" className="qbody" style={{ fontWeight: 400 }} text={q.body} />
+          <SetWrap q={q} qs={qs}>
+          <RichText as="h2" className="qbody" style={{ fontWeight: 400 }} text={q.body} />
           {q.kind === 'tita' ? (
             <div className="typein">
               <label className="sr" htmlFor={`pt-${q.id}`}>Your answer</label>
@@ -1169,6 +1242,7 @@ function Practice({ code, creds, backLabel, onExit }) {
               ))}
             </div>
           )}
+          </SetWrap>
           <div className="qnav">
             <button className="btn ghost" onClick={() => setIdx(idx - 1)} disabled={idx === 0}>Previous</button>
             <button className="link" onClick={() => set(null)} disabled={!isAnswered(answers[q.id])}>Clear response</button>

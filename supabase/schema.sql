@@ -734,7 +734,7 @@ begin
   end if;
 
   -- 6 digits from a secure random source
-  v_otp := lpad(((('x' || encode(gen_random_bytes(4), 'hex'))::bit(32)::bigint) % 1000000)::text, 6, '0');
+  v_otp := lpad(((('x' || substr(replace(gen_random_uuid()::text, '-', ''), 1, 8))::bit(32)::bigint) % 1000000)::text, 6, '0');
 
   insert into quiz_otps (quiz_id, email, salt, code_hash, sent_at, expires_at, tries)
   values (q.id, v_email, v_salt, _pin_hash(v_salt, v_otp), now(), now() + interval '10 minutes', 0)
@@ -1210,7 +1210,7 @@ begin
       'wait', ceil(extract(epoch from (o.sent_at + interval '60 seconds' - now())))::int);
   end if;
 
-  v_otp := lpad(((('x' || encode(gen_random_bytes(4), 'hex'))::bit(32)::bigint) % 1000000)::text, 6, '0');
+  v_otp := lpad(((('x' || substr(replace(gen_random_uuid()::text, '-', ''), 1, 8))::bit(32)::bigint) % 1000000)::text, 6, '0');
 
   insert into quiz_otps (quiz_id, email, salt, code_hash, sent_at, expires_at, tries)
   values (q.id, v_email, v_salt, _pin_hash(v_salt, v_otp), now(), now() + interval '10 minutes', 0)
@@ -1712,7 +1712,7 @@ declare v_pin text; v_salt text := gen_random_uuid()::text;
 begin
   if not is_admin() then raise exception 'NOT_ADMIN'; end if;
   if not exists (select 1 from attempts where id = p_attempt) then raise exception 'INVALID_ATTEMPT'; end if;
-  v_pin := lpad(((('x' || encode(gen_random_bytes(4), 'hex'))::bit(32)::bigint) % 10000)::text, 4, '0');
+  v_pin := lpad(((('x' || substr(replace(gen_random_uuid()::text, '-', ''), 1, 8))::bit(32)::bigint) % 10000)::text, 4, '0');
   update attempts
   set pin_salt = v_salt, pin_hash = _pin_hash(v_salt, v_pin), pin_fails = 0, pin_locked_until = null, link_requested_at = null
   where id = p_attempt;
@@ -1808,6 +1808,782 @@ begin
 end $$;
 
 grant execute on function public.my_library(jsonb) to anon, authenticated;
+
+notify pgrst, 'reload schema';
+
+-- ================= v11: programs (same as patch_programs.sql) =================
+
+create table if not exists public.programs (
+  name text primary key check (length(name) between 1 and 40),
+  roster_only boolean not null default false,
+  created_at timestamptz not null default now()
+);
+insert into public.programs (name, roster_only) values ('FYQ', false), ('LRDI', true) on conflict (name) do nothing;
+
+create table if not exists public.program_members (
+  program text not null references public.programs(name) on update cascade on delete cascade,
+  email text not null check (email = lower(btrim(email)) and email ~ '^[^@\s]+@[^@\s]+\.[^@\s]+$'),
+  created_at timestamptz not null default now(),
+  primary key (program, email)
+);
+create index if not exists program_members_email on public.program_members (email);
+
+alter table public.quizzes add column if not exists program text not null default 'FYQ';
+do $$
+begin
+  if not exists (select 1 from pg_constraint where conrelid = 'public.quizzes'::regclass and conname = 'quizzes_program_fkey') then
+    alter table public.quizzes add constraint quizzes_program_fkey foreign key (program) references public.programs(name) on update cascade;
+  end if;
+end $$;
+
+alter table public.programs enable row level security;
+alter table public.program_members enable row level security;
+drop policy if exists programs_admin on public.programs;
+create policy programs_admin on public.programs for all to authenticated using (public.is_admin()) with check (public.is_admin());
+drop policy if exists program_members_admin on public.program_members;
+create policy program_members_admin on public.program_members for all to authenticated using (public.is_admin()) with check (public.is_admin());
+
+-- ---------- starting a quiz checks the roster ----------
+
+create or replace function public.start_attempt(p_code text, p_name text, p_email text, p_pin text default null, p_otp text default null) returns jsonb
+language plpgsql security definer set search_path = public as $$
+declare
+  q quizzes%rowtype; v_name text; v_email text; v_id uuid; v_token uuid; v_quiz uuid;
+  v_pin text := nullif(btrim(coalesce(p_pin, '')), '');
+  v_salt text; v_hash text;
+  o quiz_otps%rowtype;
+begin
+  v_name := trim(regexp_replace(coalesce(p_name, ''), '\s+', ' ', 'g'));
+  v_email := lower(trim(coalesce(p_email, '')));
+  if length(v_name) < 2 or length(v_name) > 80 then raise exception 'BAD_NAME'; end if;
+  if length(v_email) > 254 or v_email !~ '^[^@\s]+@[^@\s]+\.[^@\s]+$' then raise exception 'BAD_EMAIL'; end if;
+  if v_pin is not null and v_pin !~ '^[0-9]{4,6}$' then raise exception 'BAD_PIN'; end if;
+
+  select id into v_quiz from quizzes where code = upper(trim(p_code));
+  if not found then raise exception 'QUIZ_NOT_FOUND'; end if;
+  perform _apply_schedule(v_quiz);
+  select * into q from quizzes where id = v_quiz;
+  if q.status = 'draft' then raise exception 'QUIZ_NOT_STARTED'; end if;
+  if q.status = 'ended' then raise exception 'QUIZ_ENDED'; end if;
+
+  -- roster programs (like LRDI): only emails on the program's list may start
+  if exists (select 1 from programs p where p.name = q.program and p.roster_only)
+     and not exists (select 1 from program_members m where m.program = q.program and m.email = v_email) then
+    raise exception 'NOT_IN_PROGRAM';
+  end if;
+
+  if q.access = 'invited' then
+    if not exists (select 1 from quiz_invites where quiz_id = q.id and email = v_email) then
+      raise exception 'NOT_INVITED';
+    end if;
+    select * into o from quiz_otps where quiz_id = q.id and email = v_email for update;
+    if not found then return jsonb_build_object('error', 'OTP_MISSING'); end if;
+    if o.expires_at <= now() then return jsonb_build_object('error', 'OTP_EXPIRED'); end if;
+    if o.tries >= 5 then return jsonb_build_object('error', 'OTP_LOCKED'); end if;
+    if _pin_hash(o.salt, btrim(coalesce(p_otp, ''))) <> o.code_hash then
+      update quiz_otps set tries = tries + 1 where quiz_id = q.id and email = v_email;
+      return jsonb_build_object('error', case when o.tries + 1 >= 5 then 'OTP_LOCKED' else 'BAD_OTP' end);
+    end if;
+  end if;
+
+  if v_pin is not null then
+    v_salt := gen_random_uuid()::text;
+    v_hash := _pin_hash(v_salt, v_pin);
+  end if;
+
+  insert into attempts (quiz_id, name, email, deadline, pin_salt, pin_hash)
+  values (q.id, v_name, v_email, now() + make_interval(mins => q.duration_minutes), v_salt, v_hash)
+  on conflict do nothing
+  returning id, token into v_id, v_token;
+
+  if v_id is null then raise exception 'ALREADY_ATTEMPTED'; end if;
+
+  delete from quiz_otps where quiz_id = q.id and email = v_email;
+
+  return _state_json(v_id) || jsonb_build_object('token', v_token);
+end $$;
+
+grant execute on function public.start_attempt(text, text, text, text, text) to anon, authenticated;
+
+create or replace function public.issue_quiz_otp(p_code text, p_email text) returns jsonb
+language plpgsql security definer set search_path = public as $$
+declare
+  q quizzes%rowtype;
+  v_email text := lower(btrim(coalesce(p_email, '')));
+  o quiz_otps%rowtype;
+  v_otp text;
+  v_salt text := gen_random_uuid()::text;
+  v_id uuid;
+begin
+  select id into v_id from quizzes where code = upper(btrim(coalesce(p_code, '')));
+  if not found then return jsonb_build_object('ok', false, 'reason', 'QUIZ_NOT_FOUND'); end if;
+  perform _apply_schedule(v_id);
+  select * into q from quizzes where id = v_id;
+  if q.status = 'draft' then return jsonb_build_object('ok', false, 'reason', 'QUIZ_NOT_STARTED'); end if;
+  if q.status = 'ended' then return jsonb_build_object('ok', false, 'reason', 'QUIZ_ENDED'); end if;
+  if q.access <> 'invited' then return jsonb_build_object('ok', false, 'reason', 'NOT_NEEDED'); end if;
+  if exists (select 1 from programs p where p.name = q.program and p.roster_only)
+     and not exists (select 1 from program_members m where m.program = q.program and m.email = v_email) then
+    return jsonb_build_object('ok', false, 'reason', 'NOT_IN_PROGRAM');
+  end if;
+  if not exists (select 1 from quiz_invites where quiz_id = q.id and email = v_email) then
+    return jsonb_build_object('ok', false, 'reason', 'NOT_INVITED');
+  end if;
+  if exists (select 1 from attempts where quiz_id = q.id and lower(email) = v_email) then
+    return jsonb_build_object('ok', false, 'reason', 'ALREADY_ATTEMPTED');
+  end if;
+
+  select * into o from quiz_otps where quiz_id = q.id and email = v_email for update;
+  if found and o.sent_at > now() - interval '60 seconds' then
+    return jsonb_build_object('ok', false, 'reason', 'OTP_WAIT',
+      'wait', ceil(extract(epoch from (o.sent_at + interval '60 seconds' - now())))::int);
+  end if;
+
+  v_otp := lpad(((('x' || substr(replace(gen_random_uuid()::text, '-', ''), 1, 8))::bit(32)::bigint) % 1000000)::text, 6, '0');
+
+  insert into quiz_otps (quiz_id, email, salt, code_hash, sent_at, expires_at, tries)
+  values (q.id, v_email, v_salt, _pin_hash(v_salt, v_otp), now(), now() + interval '10 minutes', 0)
+  on conflict (quiz_id, email) do update
+    set salt = excluded.salt, code_hash = excluded.code_hash, sent_at = excluded.sent_at,
+        expires_at = excluded.expires_at, tries = 0;
+
+  return jsonb_build_object('ok', true, 'otp', v_otp, 'title', q.title);
+end $$;
+
+revoke all on function public.issue_quiz_otp(text, text) from public, anon, authenticated;
+grant execute on function public.issue_quiz_otp(text, text) to service_role;
+
+-- ---------- the quiz page knows the program ----------
+
+create or replace function public.quiz_info(p_code text) returns jsonb
+language plpgsql security definer set search_path = public as $$
+declare q quizzes%rowtype; n int; t int; v_id uuid;
+begin
+  select id into v_id from quizzes where code = upper(trim(p_code));
+  if not found then return jsonb_build_object('found', false); end if;
+  perform _apply_schedule(v_id);
+  select * into q from quizzes where id = v_id;
+  select count(*), count(*) filter (where kind = 'tita') into n, t from questions where quiz_id = q.id;
+  return jsonb_build_object(
+    'found', true,
+    'title', q.title,
+    'instructions', q.instructions,
+    'status', q.status,
+    'access', q.access,
+    'starts_at', case when q.status = 'draft' then q.starts_at end,
+    'ends_at', case when q.status <> 'ended' then q.ends_at end,
+    'server_now', now(),
+    'practice', false,
+    'program', q.program,
+    'roster_only', coalesce((select p.roster_only from programs p where p.name = q.program), false),
+    'duration_minutes', q.duration_minutes,
+    'marks_correct', q.marks_correct,
+    'marks_wrong', q.marks_wrong,
+    'marks_wrong_tita', q.marks_wrong_tita,
+    'question_count', n,
+    'tita_count', t);
+end $$;
+
+-- ---------- the library shows only the student's programs ----------
+
+create or replace function public.my_library(p_items jsonb) returns jsonb
+language plpgsql security definer set search_path = public as $$
+declare v_emails text[]; v_batches text[];
+begin
+  if p_items is null or jsonb_typeof(p_items) <> 'array' or jsonb_array_length(p_items) > 300 then
+    return jsonb_build_object('emails', '[]'::jsonb, 'quizzes', '[]'::jsonb);
+  end if;
+
+  perform _apply_schedules();
+
+  -- who is this: every email with a matching attempt secret
+  select array_agg(distinct lower(a.email)) into v_emails
+  from attempts a
+  join (
+    select case when (e ->> 'a') ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$' then (e ->> 'a')::uuid end as a,
+           case when (e ->> 't') ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$' then (e ->> 't')::uuid end as t
+    from jsonb_array_elements(p_items) e where jsonb_typeof(e) = 'object'
+  ) p on a.id = p.a and a.token = p.t;
+
+  if v_emails is null then
+    return jsonb_build_object('emails', '[]'::jsonb, 'quizzes', '[]'::jsonb);
+  end if;
+
+  -- their batches: any batch of a quiz they attempted
+  select array_agg(distinct lower(z.batch)) into v_batches
+  from attempts a join quizzes z on z.id = a.quiz_id
+  where lower(a.email) = any (v_emails) and z.batch is not null;
+
+  return jsonb_build_object(
+    'emails', to_jsonb(v_emails),
+    'quizzes', coalesce((
+      select jsonb_agg(jsonb_build_object(
+          'code', z.code, 'title', z.title, 'program', z.program,
+          'batch', z.batch, 'topic', coalesce(z.topic, 'Other'),
+          'status', z.status,
+          'starts_at', case when z.status = 'draft' then z.starts_at end,
+          'ends_at', case when z.status = 'live' then z.ends_at end,
+          'opened_at', coalesce(z.started_at, z.starts_at, z.created_at),
+          'duration_minutes', z.duration_minutes,
+          'question_count', (select count(*) from questions x where x.quiz_id = z.id),
+          'practice', z.allow_practice,
+          'mine', (
+            select jsonb_build_object(
+              'status', m.status,
+              'submitted_at', m.submitted_at,
+              'score', case when z.show_score then m.score end,
+              'total_marks', case when z.show_score then (select count(*) from questions x where x.quiz_id = z.id) * z.marks_correct end,
+              'rank', case when z.show_score and m.status = 'submitted' then 1 + (select count(*) from attempts o where o.quiz_id = z.id and o.status = 'submitted' and o.score > m.score) end,
+              'of', case when z.show_score and m.status = 'submitted' then (select count(*) from attempts o where o.quiz_id = z.id and o.status = 'submitted' and o.score is not null) end,
+              'percentile', case when z.show_score and m.status = 'submitted' then round(100.0 *
+                  (select count(*) from attempts o where o.quiz_id = z.id and o.status = 'submitted' and o.score <= m.score) /
+                  nullif((select count(*) from attempts o where o.quiz_id = z.id and o.status = 'submitted' and o.score is not null), 0), 2) end)
+            from attempts m where m.quiz_id = z.id and lower(m.email) = any (v_emails)
+            order by m.started_at desc limit 1))
+        order by coalesce(z.started_at, z.starts_at, z.created_at) desc)
+      from quizzes z
+      where z.in_library and z.batch is not null
+        -- their programs: any roster they are on, plus any open program they have attempted in
+        and (z.program in (select m.program from program_members m where m.email = any (v_emails))
+             or (not coalesce((select p.roster_only from programs p where p.name = z.program), false)
+                 and z.program in (select y.program from attempts a2 join quizzes y on y.id = a2.quiz_id
+                                   where lower(a2.email) = any (v_emails))))
+        and (z.status in ('live', 'ended') or (z.status = 'draft' and z.starts_at is not null))
+        and (z.access = 'open'
+             or exists (select 1 from quiz_invites i where i.quiz_id = z.id and i.email = any (v_emails))
+             or exists (select 1 from attempts m where m.quiz_id = z.id and lower(m.email) = any (v_emails)))
+    ), '[]'::jsonb));
+end $$;
+
+grant execute on function public.my_library(jsonb) to anon, authenticated;
+
+notify pgrst, 'reload schema';
+
+-- ================= v12: LRDI weeks and week order (same as patch_weeks.sql) =================
+-- GRADQUIZ patch: LRDI weeks. Run once in the Supabase SQL Editor, after patch_programs.sql. Safe to run again.
+-- A week (Week 3, named by its Topic) has days. Each Core, Challenge and Surprise day has a Pre-quiz that students
+-- take before the session. Core and Challenge days also have a Quiz that unlocks after the session (you start it).
+-- One Sectional per week comes after the Surprise day. Extra sectionals sit outside weeks in their own group.
+-- Quizzes of a week that are not open yet show to students as locked. A scheduled Surprise day pre-quiz shows
+-- no title, time or size until it goes live.
+-- In a week, each pre-quiz, quiz and the sectional opens for a student only after they submit the one before it
+-- (order: Core days, Challenge days, Surprise days, Sectional; in a day the Pre-quiz comes before the Quiz).
+
+alter table public.quizzes add column if not exists week_no int;
+alter table public.quizzes add column if not exists day_type text;
+alter table public.quizzes add column if not exists day_no int;
+alter table public.quizzes add column if not exists part text;
+alter table public.quizzes drop constraint if exists quizzes_week_check;
+alter table public.quizzes add constraint quizzes_week_check check (
+  (week_no is null or week_no between 1 and 500)
+  and (day_type is null or day_type in ('core', 'challenge', 'surprise', 'sectional', 'extra'))
+  and (day_no is null or day_no between 1 and 50)
+  and (part is null or part in ('pre', 'post')));
+
+-- ---------- week order ----------
+
+-- Place in the week: Core days, then Challenge days, then Surprise days, then the Sectional. Pre-quiz before Quiz.
+create or replace function public._week_rank(p_day text, p_no int, p_part text) returns int
+language sql immutable as $$
+  select case p_day when 'core' then 0 when 'challenge' then 1 when 'surprise' then 2 when 'sectional' then 3 end * 10000
+       + coalesce(p_no, 0) * 10 + case when p_part = 'post' then 1 else 0 end;
+$$;
+
+-- The quiz a student must submit before this one, or null (first in its week, or not part of a week).
+create or replace function public._week_prev(p_quiz uuid) returns uuid
+language sql stable security definer set search_path = public as $$
+  select y.id
+  from quizzes z
+  join quizzes y on y.program = z.program and y.batch is not distinct from z.batch and y.week_no = z.week_no
+                and y.id <> z.id and y.day_type in ('core', 'challenge', 'surprise', 'sectional')
+                and _week_rank(y.day_type, y.day_no, y.part) < _week_rank(z.day_type, z.day_no, z.part)
+  where z.id = p_quiz and z.week_no is not null and z.day_type in ('core', 'challenge', 'surprise', 'sectional')
+  order by _week_rank(y.day_type, y.day_no, y.part) desc, y.created_at desc
+  limit 1;
+$$;
+
+-- "Core Day 2 Pre-quiz", "Challenge Day 1 Quiz", "Surprise Day 1 Pre-quiz", "Week 3 Sectional"
+create or replace function public._week_label(p_quiz uuid) returns text
+language sql stable security definer set search_path = public as $$
+  select case z.day_type
+           when 'sectional' then 'Week ' || z.week_no || ' Sectional'
+           else initcap(z.day_type) || ' Day ' || coalesce(z.day_no, 1) || case when z.part = 'post' then ' Quiz' else ' Pre-quiz' end
+         end
+  from quizzes z where z.id = p_quiz;
+$$;
+
+-- Checked on every new attempt, so no route can skip it.
+create or replace function public._check_week_order() returns trigger
+language plpgsql security definer set search_path = public as $$
+declare v_prev uuid;
+begin
+  v_prev := _week_prev(new.quiz_id);
+  if v_prev is not null and not exists (
+       select 1 from attempts a where a.quiz_id = v_prev and lower(a.email) = lower(new.email) and a.status = 'submitted') then
+    raise exception 'LOCKED_PREVIOUS: %', _week_label(v_prev);
+  end if;
+  return new;
+end $$;
+
+drop trigger if exists attempts_week_order on public.attempts;
+create trigger attempts_week_order before insert on public.attempts
+  for each row execute function public._check_week_order();
+
+revoke all on function public._week_prev(uuid) from public, anon, authenticated;
+revoke all on function public._week_label(uuid) from public, anon, authenticated;
+
+create or replace function public.my_library(p_items jsonb) returns jsonb
+language plpgsql security definer set search_path = public as $$
+declare v_emails text[]; v_batches text[];
+begin
+  if p_items is null or jsonb_typeof(p_items) <> 'array' or jsonb_array_length(p_items) > 300 then
+    return jsonb_build_object('emails', '[]'::jsonb, 'quizzes', '[]'::jsonb);
+  end if;
+
+  perform _apply_schedules();
+
+  -- who is this: every email with a matching attempt secret
+  select array_agg(distinct lower(a.email)) into v_emails
+  from attempts a
+  join (
+    select case when (e ->> 'a') ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$' then (e ->> 'a')::uuid end as a,
+           case when (e ->> 't') ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$' then (e ->> 't')::uuid end as t
+    from jsonb_array_elements(p_items) e where jsonb_typeof(e) = 'object'
+  ) p on a.id = p.a and a.token = p.t;
+
+  if v_emails is null then
+    return jsonb_build_object('emails', '[]'::jsonb, 'quizzes', '[]'::jsonb);
+  end if;
+
+  -- their batches: any batch of a quiz they attempted
+  select array_agg(distinct lower(z.batch)) into v_batches
+  from attempts a join quizzes z on z.id = a.quiz_id
+  where lower(a.email) = any (v_emails) and z.batch is not null;
+
+  return jsonb_build_object(
+    'emails', to_jsonb(v_emails),
+    'quizzes', coalesce((
+      select jsonb_agg(jsonb_build_object(
+          'code', z.code, 'program', z.program,
+          -- a scheduled Surprise Day stays a surprise: no title, time or size until it goes live
+          'title', case when z.day_type = 'surprise' and z.status = 'draft' then null else z.title end,
+          'week_no', z.week_no, 'day_type', z.day_type, 'day_no', z.day_no, 'part', z.part,
+          'batch', z.batch, 'topic', coalesce(z.topic, 'Other'),
+          'status', z.status,
+          'starts_at', case when z.status = 'draft' and z.day_type is distinct from 'surprise' then z.starts_at end,
+          'ends_at', case when z.status = 'live' then z.ends_at end,
+          'opened_at', case when z.day_type = 'surprise' and z.status = 'draft' then z.created_at else coalesce(z.started_at, z.starts_at, z.created_at) end,
+          'duration_minutes', case when z.day_type = 'surprise' and z.status = 'draft' then null else z.duration_minutes end,
+          'question_count', case when z.day_type = 'surprise' and z.status = 'draft' then null else (select count(*) from questions x where x.quiz_id = z.id) end,
+          'practice', z.allow_practice,
+          -- the earlier quiz of this week they still have to submit before this one opens
+          'needs', (select _week_label(pv.id) from (select _week_prev(z.id) as id) pv
+                    where pv.id is not null and not exists (
+                      select 1 from attempts a3 where a3.quiz_id = pv.id and lower(a3.email) = any (v_emails) and a3.status = 'submitted')),
+          'mine', (
+            select jsonb_build_object(
+              'status', m.status,
+              'submitted_at', m.submitted_at,
+              'score', case when z.show_score then m.score end,
+              'total_marks', case when z.show_score then (select count(*) from questions x where x.quiz_id = z.id) * z.marks_correct end,
+              'rank', case when z.show_score and m.status = 'submitted' then 1 + (select count(*) from attempts o where o.quiz_id = z.id and o.status = 'submitted' and o.score > m.score) end,
+              'of', case when z.show_score and m.status = 'submitted' then (select count(*) from attempts o where o.quiz_id = z.id and o.status = 'submitted' and o.score is not null) end,
+              'percentile', case when z.show_score and m.status = 'submitted' then round(100.0 *
+                  (select count(*) from attempts o where o.quiz_id = z.id and o.status = 'submitted' and o.score <= m.score) /
+                  nullif((select count(*) from attempts o where o.quiz_id = z.id and o.status = 'submitted' and o.score is not null), 0), 2) end)
+            from attempts m where m.quiz_id = z.id and lower(m.email) = any (v_emails)
+            order by m.started_at desc limit 1))
+        order by coalesce(z.started_at, z.starts_at, z.created_at) desc)
+      from quizzes z
+      where z.in_library and z.batch is not null
+        -- their programs: any roster they are on, plus any open program they have attempted in
+        and (z.program in (select m.program from program_members m where m.email = any (v_emails))
+             or (not coalesce((select p.roster_only from programs p where p.name = z.program), false)
+                 and z.program in (select y.program from attempts a2 join quizzes y on y.id = a2.quiz_id
+                                   where lower(a2.email) = any (v_emails))))
+        -- drafts show when scheduled, or as locked when they belong to a week
+        and (z.status in ('live', 'ended') or (z.status = 'draft' and (z.starts_at is not null or (z.week_no is not null and z.day_type is not null))))
+        and (z.access = 'open'
+             or exists (select 1 from quiz_invites i where i.quiz_id = z.id and i.email = any (v_emails))
+             or exists (select 1 from attempts m where m.quiz_id = z.id and lower(m.email) = any (v_emails)))
+    ), '[]'::jsonb));
+end $$;
+
+grant execute on function public.my_library(jsonb) to anon, authenticated;
+
+notify pgrst, 'reload schema';
+
+-- ================= v13: LRDI sets, images and tables (same as patch_sets.sql) =================
+-- GRADQUIZ patch: LRDI sets, images, charts and tables. Run once in the Supabase SQL Editor, after patch_weeks.sql.
+-- Safe to run again.
+-- A set is a shared passage (directions, data, a chart or a table) that several questions use. Students see the
+-- passage beside the question. Images are stored in the public Storage bucket quiz-images (only admins can upload)
+-- and are written into any text as a line like  ![](https://...)  . Tables are written as | a | b | rows.
+
+alter table public.questions add column if not exists set_no int;
+alter table public.questions add column if not exists set_body text;
+alter table public.questions drop constraint if exists questions_set_check;
+alter table public.questions add constraint questions_set_check check (
+  (set_no is null and set_body is null) or (set_no between 1 and 500 and set_body is not null));
+
+-- ---------- images: public bucket, admins upload ----------
+
+insert into storage.buckets (id, name, public, file_size_limit, allowed_mime_types)
+values ('quiz-images', 'quiz-images', true, 5242880, array['image/png', 'image/jpeg', 'image/webp', 'image/gif'])
+on conflict (id) do update set public = true, file_size_limit = excluded.file_size_limit, allowed_mime_types = excluded.allowed_mime_types;
+
+drop policy if exists quiz_images_admin_read on storage.objects;
+create policy quiz_images_admin_read on storage.objects for select to authenticated
+  using (bucket_id = 'quiz-images' and public.is_admin());
+drop policy if exists quiz_images_admin_insert on storage.objects;
+create policy quiz_images_admin_insert on storage.objects for insert to authenticated
+  with check (bucket_id = 'quiz-images' and public.is_admin());
+drop policy if exists quiz_images_admin_update on storage.objects;
+create policy quiz_images_admin_update on storage.objects for update to authenticated
+  using (bucket_id = 'quiz-images' and public.is_admin());
+drop policy if exists quiz_images_admin_delete on storage.objects;
+create policy quiz_images_admin_delete on storage.objects for delete to authenticated
+  using (bucket_id = 'quiz-images' and public.is_admin());
+
+-- ---------- students get the set passage with each question ----------
+
+create or replace function public._questions_json(p_quiz uuid) returns jsonb
+language sql stable security definer set search_path = public as $$
+select coalesce(jsonb_agg(jsonb_build_object('id', id, 'kind', kind, 'body', body, 'options', options,
+                                             'set_no', set_no, 'set_body', set_body) order by position), '[]'::jsonb)
+from questions where quiz_id = p_quiz;
+$$;
+
+create or replace function public._attempt_questions_json(p_attempt uuid) returns jsonb
+language sql stable security definer set search_path = public as $$
+  select coalesce(jsonb_agg(jsonb_build_object(
+      'id', z.id, 'kind', z.kind, 'body', z.body, 'options', z.options,
+      'set_no', z.set_no, 'set_body', z.set_body,
+      'opt_map', a.opt_order -> z.id::text)
+    order by coalesce(array_position(a.q_order, z.id), 0), z.position), '[]'::jsonb)
+  from attempts a join questions z on z.quiz_id = a.quiz_id
+  where a.id = p_attempt;
+$$;
+
+-- Shuffling keeps the questions of a set together and in their own order; sets and single questions move as blocks.
+create or replace function public._attempt_shuffle() returns trigger
+language plpgsql security definer set search_path = public as $$
+declare q quizzes%rowtype;
+begin
+  select * into q from quizzes where id = new.quiz_id;
+  if q.shuffle_questions then
+    new.q_order := (
+      select array_agg(z.id order by b.r, z.position)
+      from questions z
+      join (select k, random() as r
+            from (select distinct coalesce('s' || x.set_no, x.id::text) as k from questions x where x.quiz_id = new.quiz_id) d) b
+        on b.k = coalesce('s' || z.set_no, z.id::text)
+      where z.quiz_id = new.quiz_id);
+  end if;
+  if q.shuffle_options then
+    new.opt_order := (
+      select jsonb_object_agg(z.id::text,
+        (select jsonb_agg(i order by random()) from generate_series(0, jsonb_array_length(z.options) - 1) i))
+      from questions z where z.quiz_id = new.quiz_id and z.kind = 'mcq');
+  end if;
+  return new;
+end $$;
+
+-- review and practice carry the passage too
+create or replace function public.get_review(p_attempt uuid, p_token uuid) returns jsonb
+language plpgsql security definer set search_path = public as $$
+declare a attempts%rowtype; q quizzes%rowtype;
+begin
+  perform _load_attempt(p_attempt, p_token);
+  select * into a from attempts where id = p_attempt;
+  select * into q from quizzes where id = a.quiz_id;
+  if a.status <> 'submitted' or not coalesce(_review_open(q.id), false) then
+    raise exception 'REVIEW_NOT_AVAILABLE';
+  end if;
+  return jsonb_build_object(
+    'title', q.title,
+    'items', (
+      select coalesce(jsonb_agg(jsonb_build_object(
+          'id', z.id,
+          'kind', z.kind,
+          'body', z.body,
+          'options', z.options,
+          'set_no', z.set_no,
+          'set_body', z.set_body,
+          'opt_map', a.opt_order -> z.id::text,
+          'your', a.answers -> z.id::text,
+          'correct', case when z.kind = 'mcq' then to_jsonb(z.correct_index) else to_jsonb(z.accepted) end,
+          'ok', a.graded -> z.id::text,
+          'bonus', z.bonus,
+          'time', a.times -> z.id::text,
+          'avg_time', (select round(avg((t.times ->> z.id::text)::numeric)) from attempts t
+                        where t.quiz_id = z.quiz_id and t.status = 'submitted' and t.times ? z.id::text),
+          'explanation', z.explanation)
+        order by coalesce(array_position(a.q_order, z.id), 0), z.position), '[]'::jsonb)
+      from questions z where z.quiz_id = q.id));
+end $$;
+
+create or replace function public.practice_check(p_code text, p_answers jsonb, p_attempt uuid default null, p_token uuid default null) returns jsonb
+language plpgsql security definer set search_path = public as $$
+declare
+  v_quiz uuid; q quizzes%rowtype; r record; given jsonb; ok boolean;
+  c int := 0; wm int := 0; wt int := 0; u int := 0;
+  items jsonb := '[]'::jsonb;
+begin
+  v_quiz := _practice_quiz(p_code, p_attempt, p_token);
+  select * into q from quizzes where id = v_quiz;
+  if p_answers is null or jsonb_typeof(p_answers) <> 'object' then p_answers := '{}'::jsonb; end if;
+
+  for r in select * from questions where quiz_id = v_quiz order by position loop
+    given := p_answers -> r.id::text;
+    -- keep only a valid answer
+    if r.kind = 'mcq' then
+      if not (jsonb_typeof(given) = 'number' and (given #>> '{}') ~ '^[0-9]{1,2}$'
+              and (given #>> '{}')::int < jsonb_array_length(r.options)) then given := null; end if;
+    else
+      if jsonb_typeof(given) = 'string' and btrim(given #>> '{}') <> '' then given := to_jsonb(left(btrim(given #>> '{}'), 40));
+      else given := null; end if;
+    end if;
+
+    if r.bonus then ok := true;
+    elsif given is null then ok := null;
+    elsif r.kind = 'mcq' then ok := (given #>> '{}')::int = r.correct_index;
+    else ok := _tita_match(given #>> '{}', r.accepted);
+    end if;
+
+    if ok is null then u := u + 1;
+    elsif ok then c := c + 1;
+    elsif r.kind = 'mcq' then wm := wm + 1;
+    else wt := wt + 1;
+    end if;
+
+    items := items || jsonb_build_array(jsonb_build_object(
+      'id', r.id, 'kind', r.kind, 'body', r.body, 'options', r.options,
+      'set_no', r.set_no, 'set_body', r.set_body,
+      'your', given,
+      'correct', case when r.kind = 'mcq' then to_jsonb(r.correct_index) else to_jsonb(r.accepted) end,
+      'ok', ok, 'bonus', r.bonus, 'explanation', r.explanation,
+      'avg_time', (select round(avg((t.times ->> r.id::text)::numeric)) from attempts t
+                    where t.quiz_id = v_quiz and t.status = 'submitted' and t.times ? r.id::text)));
+  end loop;
+
+  return jsonb_build_object(
+    'title', q.title,
+    'score', c * q.marks_correct - wm * q.marks_wrong - wt * q.marks_wrong_tita,
+    'total_marks', (select count(*) from questions where quiz_id = v_quiz) * q.marks_correct,
+    'correct', c, 'wrong', wm + wt, 'unattempted', u,
+    'items', items);
+end $$;
+
+notify pgrst, 'reload schema';
+
+
+-- ================= v14: email code once per device (same as patch_device.sql) =================
+-- GRADQUIZ patch: email code once per device for listed-students programs (like LRDI).
+-- Run once in the Supabase SQL Editor, after patch_sets.sql. Safe to run again.
+-- Turn it on per program under Admin > Programs. The first time a student starts a quiz of that program on a
+-- phone or laptop, a 6 digit code is emailed (same Gmail setup as Invited only). That device is then trusted
+-- for that email for 60 days, so someone who only knows another student's email cannot start as them.
+
+alter table public.programs add column if not exists verify_device boolean not null default false;
+
+create table if not exists public.trusted_devices (
+  token_hash text primary key,
+  email text not null,
+  created_at timestamptz not null default now(),
+  last_used_at timestamptz,
+  expires_at timestamptz not null
+);
+create index if not exists trusted_devices_email on public.trusted_devices (email);
+alter table public.trusted_devices enable row level security;
+drop policy if exists trusted_devices_admin on public.trusted_devices;
+create policy trusted_devices_admin on public.trusted_devices for all to authenticated
+  using (public.is_admin()) with check (public.is_admin());
+
+-- only a hash of the device secret is stored
+create or replace function public._device_hash(p text) returns text
+language sql immutable as $$ select encode(sha256(convert_to(p, 'UTF8')), 'hex') $$;
+
+-- removing a student from a program forgets their devices too
+create or replace function public._forget_devices() returns trigger
+language plpgsql security definer set search_path = public as $$
+begin
+  if not exists (select 1 from program_members m where m.email = old.email) then
+    delete from trusted_devices where email = old.email;
+  end if;
+  return old;
+end $$;
+drop trigger if exists program_members_forget on public.program_members;
+create trigger program_members_forget after delete on public.program_members
+  for each row execute function public._forget_devices();
+
+create or replace function public.quiz_info(p_code text) returns jsonb
+language plpgsql security definer set search_path = public as $$
+declare q quizzes%rowtype; n int; t int; v_id uuid;
+begin
+  select id into v_id from quizzes where code = upper(trim(p_code));
+  if not found then return jsonb_build_object('found', false); end if;
+  perform _apply_schedule(v_id);
+  select * into q from quizzes where id = v_id;
+  select count(*), count(*) filter (where kind = 'tita') into n, t from questions where quiz_id = q.id;
+  return jsonb_build_object(
+    'found', true,
+    'title', q.title,
+    'instructions', q.instructions,
+    'status', q.status,
+    'access', q.access,
+    'starts_at', case when q.status = 'draft' then q.starts_at end,
+    'ends_at', case when q.status <> 'ended' then q.ends_at end,
+    'server_now', now(),
+    'practice', false,
+    'program', q.program,
+    'roster_only', coalesce((select p.roster_only from programs p where p.name = q.program), false),
+    -- listed-students programs can ask for an email code once per device
+    'verify_device', q.access <> 'invited' and coalesce((select p.roster_only and p.verify_device from programs p where p.name = q.program), false),
+    'duration_minutes', q.duration_minutes,
+    'marks_correct', q.marks_correct,
+    'marks_wrong', q.marks_wrong,
+    'marks_wrong_tita', q.marks_wrong_tita,
+    'question_count', n,
+    'tita_count', t);
+end $$;
+
+drop function if exists public.start_attempt(text, text, text, text, text);
+
+create or replace function public.start_attempt(p_code text, p_name text, p_email text, p_pin text default null, p_otp text default null, p_device text default null) returns jsonb
+language plpgsql security definer set search_path = public as $$
+declare
+  q quizzes%rowtype; v_name text; v_email text; v_id uuid; v_token uuid; v_quiz uuid;
+  v_pin text := nullif(btrim(coalesce(p_pin, '')), '');
+  v_salt text; v_hash text;
+  o quiz_otps%rowtype;
+  v_verify boolean;
+  v_dev text := nullif(btrim(coalesce(p_device, '')), '');
+  v_newdev text;
+begin
+  v_name := trim(regexp_replace(coalesce(p_name, ''), '\s+', ' ', 'g'));
+  v_email := lower(trim(coalesce(p_email, '')));
+  if length(v_name) < 2 or length(v_name) > 80 then raise exception 'BAD_NAME'; end if;
+  if length(v_email) > 254 or v_email !~ '^[^@\s]+@[^@\s]+\.[^@\s]+$' then raise exception 'BAD_EMAIL'; end if;
+  if v_pin is not null and v_pin !~ '^[0-9]{4,6}$' then raise exception 'BAD_PIN'; end if;
+
+  select id into v_quiz from quizzes where code = upper(trim(p_code));
+  if not found then raise exception 'QUIZ_NOT_FOUND'; end if;
+  perform _apply_schedule(v_quiz);
+  select * into q from quizzes where id = v_quiz;
+  if q.status = 'draft' then raise exception 'QUIZ_NOT_STARTED'; end if;
+  if q.status = 'ended' then raise exception 'QUIZ_ENDED'; end if;
+
+  -- roster programs (like LRDI): only emails on the program's list may start
+  if exists (select 1 from programs p where p.name = q.program and p.roster_only)
+     and not exists (select 1 from program_members m where m.program = q.program and m.email = v_email) then
+    raise exception 'NOT_IN_PROGRAM';
+  end if;
+
+  -- email code once per device: a trusted device for this email goes straight in, otherwise the emailed code
+  -- proves the email is theirs and this device is remembered for 60 days
+  v_verify := q.access <> 'invited' and coalesce((select p.roster_only and p.verify_device from programs p where p.name = q.program), false);
+  if v_verify then
+    if v_dev is not null and exists (select 1 from trusted_devices d where d.token_hash = _device_hash(v_dev) and d.email = v_email and d.expires_at > now()) then
+      update trusted_devices set last_used_at = now() where token_hash = _device_hash(v_dev);
+    else
+      if nullif(btrim(coalesce(p_otp, '')), '') is null then return jsonb_build_object('error', 'NEED_CODE'); end if;
+      select * into o from quiz_otps where quiz_id = q.id and email = v_email for update;
+      if not found then return jsonb_build_object('error', 'OTP_MISSING'); end if;
+      if o.expires_at <= now() then return jsonb_build_object('error', 'OTP_EXPIRED'); end if;
+      if o.tries >= 5 then return jsonb_build_object('error', 'OTP_LOCKED'); end if;
+      if _pin_hash(o.salt, btrim(coalesce(p_otp, ''))) <> o.code_hash then
+        update quiz_otps set tries = tries + 1 where quiz_id = q.id and email = v_email;
+        return jsonb_build_object('error', case when o.tries + 1 >= 5 then 'OTP_LOCKED' else 'BAD_OTP' end);
+      end if;
+      v_newdev := replace(gen_random_uuid()::text, '-', '') || replace(gen_random_uuid()::text, '-', '');
+      insert into trusted_devices (token_hash, email, expires_at) values (_device_hash(v_newdev), v_email, now() + interval '60 days');
+    end if;
+  end if;
+
+  if q.access = 'invited' then
+    if not exists (select 1 from quiz_invites where quiz_id = q.id and email = v_email) then
+      raise exception 'NOT_INVITED';
+    end if;
+    select * into o from quiz_otps where quiz_id = q.id and email = v_email for update;
+    if not found then return jsonb_build_object('error', 'OTP_MISSING'); end if;
+    if o.expires_at <= now() then return jsonb_build_object('error', 'OTP_EXPIRED'); end if;
+    if o.tries >= 5 then return jsonb_build_object('error', 'OTP_LOCKED'); end if;
+    if _pin_hash(o.salt, btrim(coalesce(p_otp, ''))) <> o.code_hash then
+      update quiz_otps set tries = tries + 1 where quiz_id = q.id and email = v_email;
+      return jsonb_build_object('error', case when o.tries + 1 >= 5 then 'OTP_LOCKED' else 'BAD_OTP' end);
+    end if;
+  end if;
+
+  if v_pin is not null then
+    v_salt := gen_random_uuid()::text;
+    v_hash := _pin_hash(v_salt, v_pin);
+  end if;
+
+  insert into attempts (quiz_id, name, email, deadline, pin_salt, pin_hash)
+  values (q.id, v_name, v_email, now() + make_interval(mins => q.duration_minutes), v_salt, v_hash)
+  on conflict do nothing
+  returning id, token into v_id, v_token;
+
+  if v_id is null then raise exception 'ALREADY_ATTEMPTED'; end if;
+
+  delete from quiz_otps where quiz_id = q.id and email = v_email;
+
+  return _state_json(v_id) || jsonb_build_object('token', v_token)
+    || case when v_newdev is not null then jsonb_build_object('device_token', v_newdev) else '{}'::jsonb end;
+end $$;
+
+grant execute on function public.start_attempt(text, text, text, text, text, text) to anon, authenticated;
+
+create or replace function public.issue_quiz_otp(p_code text, p_email text) returns jsonb
+language plpgsql security definer set search_path = public as $$
+declare
+  q quizzes%rowtype;
+  v_email text := lower(btrim(coalesce(p_email, '')));
+  o quiz_otps%rowtype;
+  v_otp text;
+  v_salt text := gen_random_uuid()::text;
+  v_id uuid;
+  v_verify boolean;
+begin
+  select id into v_id from quizzes where code = upper(btrim(coalesce(p_code, '')));
+  if not found then return jsonb_build_object('ok', false, 'reason', 'QUIZ_NOT_FOUND'); end if;
+  perform _apply_schedule(v_id);
+  select * into q from quizzes where id = v_id;
+  if q.status = 'draft' then return jsonb_build_object('ok', false, 'reason', 'QUIZ_NOT_STARTED'); end if;
+  if q.status = 'ended' then return jsonb_build_object('ok', false, 'reason', 'QUIZ_ENDED'); end if;
+  v_verify := q.access <> 'invited' and coalesce((select p.roster_only and p.verify_device from programs p where p.name = q.program), false);
+  if q.access <> 'invited' and not v_verify then return jsonb_build_object('ok', false, 'reason', 'NOT_NEEDED'); end if;
+  if exists (select 1 from programs p where p.name = q.program and p.roster_only)
+     and not exists (select 1 from program_members m where m.program = q.program and m.email = v_email) then
+    return jsonb_build_object('ok', false, 'reason', 'NOT_IN_PROGRAM');
+  end if;
+  if not v_verify and not exists (select 1 from quiz_invites where quiz_id = q.id and email = v_email) then
+    return jsonb_build_object('ok', false, 'reason', 'NOT_INVITED');
+  end if;
+  if exists (select 1 from attempts where quiz_id = q.id and lower(email) = v_email) then
+    return jsonb_build_object('ok', false, 'reason', 'ALREADY_ATTEMPTED');
+  end if;
+
+  select * into o from quiz_otps where quiz_id = q.id and email = v_email for update;
+  if found and o.sent_at > now() - interval '60 seconds' then
+    return jsonb_build_object('ok', false, 'reason', 'OTP_WAIT',
+      'wait', ceil(extract(epoch from (o.sent_at + interval '60 seconds' - now())))::int);
+  end if;
+
+  v_otp := lpad(((('x' || substr(replace(gen_random_uuid()::text, '-', ''), 1, 8))::bit(32)::bigint) % 1000000)::text, 6, '0');
+
+  insert into quiz_otps (quiz_id, email, salt, code_hash, sent_at, expires_at, tries)
+  values (q.id, v_email, v_salt, _pin_hash(v_salt, v_otp), now(), now() + interval '10 minutes', 0)
+  on conflict (quiz_id, email) do update
+    set salt = excluded.salt, code_hash = excluded.code_hash, sent_at = excluded.sent_at,
+        expires_at = excluded.expires_at, tries = 0;
+
+  return jsonb_build_object('ok', true, 'otp', v_otp, 'title', q.title);
+end $$;
+
+revoke all on function public.issue_quiz_otp(text, text) from public, anon, authenticated;
+grant execute on function public.issue_quiz_otp(text, text) to service_role;
 
 notify pgrst, 'reload schema';
 

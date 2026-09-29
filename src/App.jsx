@@ -8,6 +8,9 @@ import Dashboard from './pages/admin/Dashboard.jsx'
 import QuizEditor from './pages/admin/QuizEditor.jsx'
 import Results from './pages/admin/Results.jsx'
 import Students from './pages/admin/Students.jsx'
+import Programs from './pages/admin/Programs.jsx'
+import NewWeek from './pages/admin/NewWeek.jsx'
+import WeekProgress from './pages/admin/WeekProgress.jsx'
 import StudentHistory from './pages/admin/StudentHistory.jsx'
 import { configured } from './lib/supabase.js'
 
@@ -33,6 +36,9 @@ export default function App() {
           <Route path="quiz/:id" element={<QuizEditor />} />
           <Route path="quiz/:id/results" element={<Results />} />
           <Route path="students" element={<Students />} />
+          <Route path="programs" element={<Programs />} />
+          <Route path="new-week" element={<NewWeek />} />
+          <Route path="progress" element={<WeekProgress />} />
           <Route path="students/:email" element={<StudentHistory />} />
         </Route>
         <Route path="*" element={<Navigate to="/" replace />} />

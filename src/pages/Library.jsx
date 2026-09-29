@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { Fragment, useCallback, useEffect, useMemo, useState } from 'react'
 import { Link, useSearchParams } from 'react-router-dom'
 import Brand from '../components/Brand.jsx'
 import { rpc } from '../lib/supabase.js'
@@ -23,10 +23,32 @@ function readSaved() {
 const stateOf = (q) => {
   if (q.mine?.status === 'in_progress') return 'progress'
   if (q.mine?.status === 'submitted') return 'done'
+  if (q.status === 'live' && q.needs) return 'waiting' // live, but the earlier quiz of the week comes first
   if (q.status === 'live') return 'live'
+  if (q.status === 'draft' && !q.starts_at) return 'locked'
   if (q.status === 'draft') return 'soon'
   return 'missed'
 }
+
+// LRDI weeks: Week 3 · Games. Core, Challenge and Surprise days each have a Pre-quiz (before the session);
+// Core and Challenge also have a Quiz (after the session). One Sectional per week. Extra sectionals sit outside weeks.
+const DAY_ORDER = { core: 0, challenge: 1, surprise: 2, sectional: 3, extra: 4 }
+const DAY_NAME = { core: 'Core', challenge: 'Challenge', surprise: 'Surprise' }
+export const dayLabel = (x) => (
+  x.day_type === 'sectional' ? 'Sectional'
+    : x.day_type === 'extra' ? `Extra Sectional${x.day_no ? ` ${x.day_no}` : ''}`
+      : x.day_type ? `${DAY_NAME[x.day_type]} Day ${x.day_no || 1}` : '')
+const partLabel = (x) => (x.day_type === 'sectional' || x.day_type === 'extra' ? 'Sectional' : x.part === 'post' ? 'Quiz' : x.part === 'pre' ? 'Pre-quiz' : '')
+const fullLabel = (x) => [dayLabel(x), ['core', 'challenge', 'surprise'].includes(x.day_type) ? partLabel(x) : ''].filter(Boolean).join(' · ')
+const secret = (x) => x.day_type === 'surprise' && x.status === 'draft'
+const titleOf = (x) => (secret(x) ? 'Surprise' : x.title)
+const byDay = (a, b) => (DAY_ORDER[a.day_type] ?? 9) - (DAY_ORDER[b.day_type] ?? 9) || (a.day_no || 0) - (b.day_no || 0)
+  || (a.part === 'post' ? 1 : 0) - (b.part === 'post' ? 1 : 0)
+const lockedText = (x) => (
+  secret(x) ? 'Revealed when it goes live'
+    : x.part === 'post' ? 'Unlocks after the session'
+      : x.day_type === 'sectional' ? 'Opens after the Surprise day'
+        : 'Opens before the session')
 
 export default function Library() {
   const [params, setParams] = useSearchParams()
@@ -52,10 +74,23 @@ export default function Library() {
     return () => clearInterval(t)
   }, [load])
 
-  const all = data?.quizzes || []
+  // students on more than one program (say FYQ and LRDI) switch between them; everything below is one program
+  const everything = data?.quizzes || []
+  const progs = [...new Set(everything.map((x) => x.program || 'FYQ'))].sort((a, b) => (a === 'FYQ' ? -1 : b === 'FYQ' ? 1 : a.localeCompare(b)))
+  const [prog, setProg] = useState(() => { try { return localStorage.getItem('gradquiz:lib:program') || '' } catch { return '' } })
+  const liveProg = progs.find((p) => everything.some((x) => (x.program || 'FYQ') === p && ['live', 'progress'].includes(stateOf(x))))
+  const highlightProg = everything.find((x) => x.code === highlight)?.program
+  const currentProg = progs.includes(prog) ? prog : highlightProg || liveProg || progs[0] || ''
+  const all = everything.filter((x) => (x.program || 'FYQ') === currentProg)
+  function pickProg(p) {
+    setProg(p)
+    setTab(null)
+    try { localStorage.setItem('gradquiz:lib:program', p) } catch { /* ignore */ }
+    if (params.get('tab') || params.get('q')) setParams({}, { replace: true })
+  }
   const liveAll = all
-    .filter((x) => ['live', 'progress'].includes(stateOf(x)))
-    .sort((a, b) => (stateOf(a) === 'progress' ? -1 : 0) - (stateOf(b) === 'progress' ? -1 : 0) || String(b.opened_at).localeCompare(String(a.opened_at)))
+    .filter((x) => ['live', 'progress', 'waiting'].includes(stateOf(x)))
+    .sort((a, b) => (stateOf(a) === 'progress' ? -1 : 0) - (stateOf(b) === 'progress' ? -1 : 0) || (stateOf(a) === 'waiting' ? 1 : 0) - (stateOf(b) === 'waiting' ? 1 : 0) || String(b.opened_at).localeCompare(String(a.opened_at)))
   const soonAll = all.filter((x) => stateOf(x) === 'soon').sort((a, b) => String(a.starts_at).localeCompare(String(b.starts_at)))
   const hasLiveTab = liveAll.length > 0 || soonAll.length > 0
 
@@ -81,7 +116,7 @@ export default function Library() {
     if (!data) return
     if (tab === null) setTab(hasLiveTab && (params.get('tab') === 'live' || liveAll.length > 0) ? 'live' : 'batch')
     else if (tab === 'live' && !hasLiveTab) setTab('batch')
-  }, [data, hasLiveTab]) // eslint-disable-line react-hooks/exhaustive-deps
+  }, [data, hasLiveTab, currentProg]) // eslint-disable-line react-hooks/exhaustive-deps
   const onLive = tab === 'live' && hasLiveTab
 
   function pickBatch(b) {
@@ -107,32 +142,40 @@ export default function Library() {
     if (filter === 'done' && s !== 'done') return false
     if (filter === 'missed' && s !== 'missed') return false
     const t = q.trim().toLowerCase()
-    return !t || x.title.toLowerCase().includes(t) || x.topic.toLowerCase().includes(t)
+    return !t || [titleOf(x), x.topic, x.week_no ? `week ${x.week_no}` : '', fullLabel(x)].some((v) => String(v || '').toLowerCase().includes(t))
   })
-  // topics, most recently active first
+  // weeks newest first (days in Core, Challenge, Surprise order), then plain topics most recently active first
   const topics = useMemo(() => {
     const m = new Map()
     for (const x of shown) {
-      if (!m.has(x.topic)) m.set(x.topic, [])
-      m.get(x.topic).push(x)
+      const key = x.week_no ? `Week ${x.week_no} · ${x.topic}` : x.day_type === 'extra' ? 'Extra sectionals' : x.topic
+      if (!m.has(key)) m.set(key, [])
+      m.get(key).push(x)
     }
     return [...m.entries()].map(([name, list]) => ({
       name,
-      list,
+      week: list[0].week_no || null,
+      extra: !list[0].week_no && list[0].day_type === 'extra',
+      locked: list.filter((x) => stateOf(x) === 'locked').length,
+      list: list[0].week_no ? [...list].sort(byDay) : list[0].day_type === 'extra' ? [...list].sort((a, b) => (b.day_no || 0) - (a.day_no || 0) || String(b.opened_at).localeCompare(String(a.opened_at))) : list,
       done: list.filter((x) => stateOf(x) === 'done').length,
       counted: list.filter((x) => ['done', 'missed'].includes(stateOf(x))).length,
-      live: list.filter((x) => ['live', 'progress'].includes(stateOf(x))).length,
+      live: list.filter((x) => ['live', 'progress', 'waiting'].includes(stateOf(x))).length,
       soon: list.filter((x) => stateOf(x) === 'soon').length,
       latest: list.reduce((m2, x) => (String(x.opened_at) > m2 ? String(x.opened_at) : m2), ''),
-    })).sort((a, b) => b.latest.localeCompare(a.latest))
+    })).sort((a, b) => (b.week || (b.extra ? 0.5 : 0)) - (a.week || (a.extra ? 0.5 : 0)) || b.latest.localeCompare(a.latest))
   }, [shown])
+  const hasWeeks = topics.some((t) => t.week)
+  // the newest week starts open; anything the student opens or closes is remembered for this visit
+  const [overrides, setOverrides] = useState({})
 
   const searching = q.trim() !== '' || filter !== 'all'
-  const toggle = (name) => setOpenTopics((s) => { const n = new Set(s); n.has(name) ? n.delete(name) : n.add(name); return n })
+  const isOpen = (key, i, t) => searching || (key in overrides ? overrides[key] : openTopics.has(key) || (t.week && i === 0))
+  const toggle = (key, i, t) => setOverrides((o) => ({ ...o, [key]: !isOpen(key, i, t) }))
   const doneAll = inBatch.filter((x) => stateOf(x) === 'done').length
   const missedAll = inBatch.filter((x) => stateOf(x) === 'missed').length
   const liveInBatch = inBatch.filter((x) => ['live', 'progress'].includes(stateOf(x))).length
-  const where = (x) => `${short(x.batch)} › ${x.topic}`
+  const where = (x) => (x.week_no ? `Week ${x.week_no} · ${x.topic}${x.day_type ? ` · ${fullLabel(x)}` : ''}` : x.day_type === 'extra' ? dayLabel(x) : `${short(x.batch)} › ${x.topic}`)
 
   return (
     <>
@@ -161,6 +204,17 @@ export default function Library() {
           <>
             <p className="muted" style={{ marginTop: 10 }}>{data.emails.join(', ')}</p>
 
+            {progs.length > 1 && (
+              <div className="progtabs" role="tablist" aria-label="Program">
+                {progs.map((p) => (
+                  <button key={p} type="button" role="tab" aria-selected={p === currentProg} onClick={() => pickProg(p)}>
+                    {p}
+                    {everything.some((x) => (x.program || 'FYQ') === p && ['live', 'progress'].includes(stateOf(x))) && <span className="livedot" aria-hidden="true" style={{ marginLeft: 8, marginRight: 0 }} />}
+                  </button>
+                ))}
+              </div>
+            )}
+
             {common && <p className="qmeta" style={{ marginTop: 24 }}>{common.replace(/[\s\-–—:|/›>]+$/, '')}</p>}
             <div className="libtabs" role="tablist" aria-label="Library" style={{ marginTop: common ? 8 : 24 }}>
               {hasLiveTab && (
@@ -171,7 +225,7 @@ export default function Library() {
                 </button>
               )}
               {batches.map((b) => (
-                <button key={b} type="button" role="tab" className="libtab" aria-selected={!onLive && b === current} onClick={() => pickBatch(b)} title={b}>
+                <button key={b} type="button" role="tab" className="libtab" aria-selected={tab === 'batch' && !onLive && b === current} onClick={() => pickBatch(b)} title={b}>
                   {short(b)}
                 </button>
               ))}
@@ -186,12 +240,14 @@ export default function Library() {
                       {liveAll.map((x) => (
                         <li key={x.code} id={`live-${x.code}`} className={x.code === highlight ? 'hl' : ''}>
                           <div>
-                            <b>{x.title}</b>
+                            <b>{titleOf(x)}</b>
                             <span className="muted small">
                               {where(x)} · {x.question_count} questions · {x.duration_minutes} min{x.ends_at ? ` · entry closes ${formatWhen(x.ends_at)}` : ''}
                             </span>
                           </div>
-                          <Link className="btn small" to={`/q/${x.code}`}>{stateOf(x) === 'progress' ? 'Continue' : 'Start'}</Link>
+                          {stateOf(x) === 'waiting'
+                            ? <span className="lockchip" title={`Submit the ${x.needs} first`}><span aria-hidden="true">🔒</span> {x.needs} first</span>
+                            : <Link className="btn small" to={`/q/${x.code}`}>{stateOf(x) === 'progress' ? 'Continue' : 'Start'}</Link>}
                         </li>
                       ))}
                     </ul>
@@ -205,10 +261,12 @@ export default function Library() {
                       {soonAll.map((x) => (
                         <li key={x.code}>
                           <div>
-                            <b>{x.title}</b>
-                            <span className="muted small">{where(x)} · {x.question_count} questions · {x.duration_minutes} min</span>
+                            <b>{titleOf(x)}</b>
+                            <span className="muted small">
+                              {secret(x) ? `${where(x)} · revealed when it goes live` : `${where(x)} · ${x.question_count} questions · ${x.duration_minutes} min`}
+                            </span>
                           </div>
-                          <span className="small soonat">Starts {formatWhen(x.starts_at)}</span>
+                          <span className="small soonat">{secret(x) ? 'Soon' : `Starts ${formatWhen(x.starts_at)}`}</span>
                         </li>
                       ))}
                     </ul>
@@ -224,7 +282,7 @@ export default function Library() {
 
             <section className="block">
               <div className="row between" style={{ alignItems: 'flex-end' }}>
-                <h2 style={{ marginBottom: 0 }}>By topic</h2>
+                <h2 style={{ marginBottom: 0 }}>{hasWeeks ? 'By week' : 'By topic'}</h2>
                 <div className="row">
                   <div className="kinds" role="radiogroup" aria-label="Show">
                     {[['all', 'All'], ['done', 'Done'], ['missed', 'Missed']].map(([k, t]) => (
@@ -237,17 +295,19 @@ export default function Library() {
 
               {topics.length === 0 && <p className="muted" style={{ marginTop: 20 }}>Nothing matches.</p>}
               <div className="topics">
-                {topics.map((t) => {
-                  const open = searching || openTopics.has(`${current}|${t.name}`)
+                {topics.map((t, i) => {
+                  const key = `${current}|${t.name}`
+                  const open = isOpen(key, i, t)
                   return (
                     <div key={t.name} className={`topic ${open ? 'open' : ''}`}>
-                      <button type="button" className="topichead" onClick={() => toggle(`${current}|${t.name}`)} aria-expanded={open}>
+                      <button type="button" className="topichead" onClick={() => toggle(key, i, t)} aria-expanded={open}>
                         <span className="tname">{t.name}</span>
                         <span className="muted small">
                           {[
                             t.counted ? `${t.done} of ${t.counted} done` : '',
                             t.live ? `${t.live} live` : '',
                             t.soon ? `${t.soon} coming up` : '',
+                            t.locked ? `${t.locked} locked` : '',
                           ].filter(Boolean).join(' · ')}
                         </span>
                         <span className="meter" aria-hidden="true" style={t.counted ? undefined : { visibility: 'hidden' }}><i style={{ width: `${t.counted ? (100 * t.done) / t.counted : 0}%` }} /></span>
@@ -255,7 +315,14 @@ export default function Library() {
                       </button>
                       {open && (
                         <ul className="liblist">
-                          {t.list.map((x) => <QuizRow key={x.code} x={x} />)}
+                          {t.list.map((x, k) => (
+                            <Fragment key={x.code}>
+                              {t.week && x.day_type && dayLabel(x) !== (t.list[k - 1] ? dayLabel(t.list[k - 1]) : '') && (
+                                <li className={`dayhead d-${x.day_type}`} aria-hidden="true">{dayLabel(x)}</li>
+                              )}
+                              <QuizRow x={x} />
+                            </Fragment>
+                          ))}
                         </ul>
                       )}
                     </div>
@@ -278,13 +345,16 @@ function QuizRow({ x }) {
   return (
     <li className={`s-${s}`}>
       <div className="lmain">
-        <b>{x.title}</b>
+        {x.day_type && <span className={`daychip d-${x.day_type}`}>{x.week_no ? partLabel(x) : dayLabel(x)}</span>}
+        <b>{titleOf(x)}</b>
         <span className="muted small">
           {s === 'done' && `Submitted ${formatWhen(m.submitted_at)}`}
           {s === 'missed' && `${formatWhen(x.opened_at)} · missed`}
           {s === 'live' && 'Live now'}
+          {s === 'waiting' && `Live now · opens after you submit the ${x.needs}`}
           {s === 'progress' && 'In progress'}
           {s === 'soon' && `Starts ${formatWhen(x.starts_at)}`}
+          {s === 'locked' && lockedText(x)}
         </span>
       </div>
       <div className="lscore">
@@ -296,6 +366,7 @@ function QuizRow({ x }) {
         {s === 'done' && <Link className="btn ghost small" to={`/q/${x.code}`}>{x.practice ? 'Result & practice' : 'Result'}</Link>}
         {(s === 'live' || s === 'progress') && <Link className="btn small" to={`/q/${x.code}`}>{s === 'progress' ? 'Continue' : 'Start'}</Link>}
         {s === 'missed' && <span className="muted small">Ended</span>}
+        {(s === 'locked' || s === 'waiting') && <span className="lockchip"><span aria-hidden="true">🔒</span> Locked</span>}
       </div>
     </li>
   )

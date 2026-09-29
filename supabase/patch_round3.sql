@@ -408,7 +408,7 @@ begin
       'wait', ceil(extract(epoch from (o.sent_at + interval '60 seconds' - now())))::int);
   end if;
 
-  v_otp := lpad(((('x' || encode(gen_random_bytes(4), 'hex'))::bit(32)::bigint) % 1000000)::text, 6, '0');
+  v_otp := lpad(((('x' || substr(replace(gen_random_uuid()::text, '-', ''), 1, 8))::bit(32)::bigint) % 1000000)::text, 6, '0');
 
   insert into quiz_otps (quiz_id, email, salt, code_hash, sent_at, expires_at, tries)
   values (q.id, v_email, v_salt, _pin_hash(v_salt, v_otp), now(), now() + interval '10 minutes', 0)
@@ -421,6 +421,9 @@ end $$;
 
 revoke all on function public.issue_quiz_otp(text, text) from public, anon, authenticated;
 grant execute on function public.issue_quiz_otp(text, text) to service_role;
+
+-- a newer start_attempt (patch_device.sql) takes one more argument; remove it so there is only one. Run patch_device.sql again after this if you use device codes.
+drop function if exists public.start_attempt(text, text, text, text, text, text);
 
 create or replace function public.start_attempt(p_code text, p_name text, p_email text, p_pin text default null, p_otp text default null) returns jsonb
 language plpgsql security definer set search_path = public as $$

@@ -118,6 +118,36 @@ Give each quiz a Batch and a Topic in Settings, and leave "Show in the students'
 
 Quizzes are grouped like the student library: a Live & upcoming tab (live and scheduled, only when there are any), Drafts, one tab per batch with topics collapsed and All / Live / Draft / Ended filters, and No batch. Search covers every quiz by title, code, batch or topic. The list refreshes every minute.
 
+## Programs (FYQ, LRDI)
+
+Every quiz belongs to a program (Program field in quiz Settings; existing quizzes are FYQ). Admin › Programs lists them. FYQ is open to anyone with the code. LRDI is listed students only: paste emails there, and only those emails can start LRDI quizzes; students cannot add themselves. The student library shows only their programs (every list they are on, plus any open program they attempted in), with an FYQ | LRDI switch for students on both. The admin quiz list has the same switch. Run `supabase/patch_programs.sql` once.
+
+## Weeks and days (LRDI)
+
+A week (named by its Topic) has Core, Challenge and Surprise days in any count (1-1-1, 2-2-2, 2-1-1...). Every day has a Pre-quiz; Core and Challenge days also have a Quiz; one Sectional per week. Extra sectionals sit outside weeks.
+
+- **New week** (Quizzes page) makes the whole week as drafts: pick the counts, the first date, and it fills one day apart. Pre-quizzes start at 10:00 am, quizzes at 6:00 pm, the Sectional at the time you give. Running it again for the same week only adds missing days.
+- **Order lock**: in a week each quiz opens for a student only after they submit the one before it (Core days, Challenge days, Surprise days, Sectional; Pre-quiz before Quiz). It is checked in the database on every start. A student who misses one that has ended stays locked for the rest of that week.
+- **Week progress** (link under each week on the Quizzes page): every student against every quiz of the week, who is stuck and where, with Copy these emails.
+- In quiz Settings a date under Schedule gets 10:00 am for a Pre-quiz and 6:00 pm for a Quiz; change it if needed.
+- A scheduled Surprise day shows only as "revealed when it goes live" until it starts.
+
+Run `supabase/patch_weeks.sql` once, after patch_programs.sql.
+
+## LRDI sets, pictures and tables
+
+- **Pictures**: in any question, set passage or explanation press Add image, paste a screenshot or drop a file. Several pictures with text between them are fine. They are stored in the Supabase Storage bucket `quiz-images` (made by the patch; only admins can upload).
+- **Tables**: rows like `| Team | Won |`, with an optional `|---|---|` line under the heading.
+- **Sets**: questions sharing one passage. Students see it beside the question (above it on phones), tap a chart to zoom. Shuffling keeps a set together.
+- Paste many: start a set with `Set:` (or a Directions line), then the passage, then questions numbered `Q1.`, `Q2.`, and `End set`. A preview shows what will be added.
+- Boxes with pictures, tables or maths show a live preview as you type.
+
+Run `supabase/patch_sets.sql` once, after patch_weeks.sql.
+
+## Email code once per device
+
+For a listed-students program (like LRDI), tick "Email code once per device" under Programs. The first time a student starts one of its quizzes on a phone or computer, a 6 digit code is emailed (same Gmail setup as Invited only). That device is then trusted for that email for 60 days, so someone who only knows another student's email cannot start as them. "Forget devices" next to an email makes that student confirm again; removing a student forgets their devices. Run `supabase/patch_device.sql` once, after patch_sets.sql.
+
 ## Paste format for many questions
 
 ```

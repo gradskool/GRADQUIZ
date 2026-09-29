@@ -35,7 +35,7 @@ declare v_pin text; v_salt text := gen_random_uuid()::text;
 begin
   if not is_admin() then raise exception 'NOT_ADMIN'; end if;
   if not exists (select 1 from attempts where id = p_attempt) then raise exception 'INVALID_ATTEMPT'; end if;
-  v_pin := lpad(((('x' || encode(gen_random_bytes(4), 'hex'))::bit(32)::bigint) % 10000)::text, 4, '0');
+  v_pin := lpad(((('x' || substr(replace(gen_random_uuid()::text, '-', ''), 1, 8))::bit(32)::bigint) % 10000)::text, 4, '0');
   update attempts
   set pin_salt = v_salt, pin_hash = _pin_hash(v_salt, v_pin), pin_fails = 0, pin_locked_until = null, link_requested_at = null
   where id = p_attempt;

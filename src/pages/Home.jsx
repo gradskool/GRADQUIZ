@@ -63,7 +63,7 @@ export default function Home() {
       const saved = readSaved()
       if (saved.length === 0) return
       rpc('my_library', { p_items: saved.map((x) => ({ a: x.a, t: x.t })) })
-        .then((d) => setLive((d?.quizzes || []).filter((x) => x.status === 'live' && x.mine?.status !== 'submitted')))
+        .then((d) => setLive((d?.quizzes || []).filter((x) => x.status === 'live' && x.mine?.status !== 'submitted' && !(x.needs && !x.mine))))
         .catch(() => { /* no banner */ })
     }
     check()

@@ -31,6 +31,9 @@ const MESSAGES = {
   SERVER: 'Something went wrong on our side. Try again.',
   PRACTICE_OFF: 'Practice is not open for this quiz.',
   PRACTICE_NOT_OPEN: 'Practice is only for students who attempted this quiz.',
+  NOT_IN_PROGRAM: 'This quiz is only for registered students of this program. If you have joined, use the email you gave your instructor.',
+  NEED_CODE: 'This device is new for this email. We emailed you a code to confirm it is you.',
+  LOCKED_PREVIOUS: 'Submit the earlier quiz of this week first. Each quiz in a week opens after you submit the one before it.',
   REPORT_NOT_AVAILABLE: 'The report is available once scores are shown.',
 }
 
@@ -44,6 +47,10 @@ export class AppError extends Error {
 export function toAppError(error) {
   const raw = String(error?.message || error || '')
   const code = Object.keys(MESSAGES).find((k) => raw.includes(k))
+  if (code === 'LOCKED_PREVIOUS') {
+    const which = (raw.match(/LOCKED_PREVIOUS:\s*([^\n]+)/) || [])[1]
+    if (which) return new AppError(code, `Submit the ${which.trim()} of this week first. Each quiz in a week opens after you submit the one before it.`)
+  }
   if (code) return new AppError(code, MESSAGES[code])
   if (/quizzes_code_key/i.test(raw)) {
     return new AppError('CODE_TAKEN', 'That code is already used by another quiz.')

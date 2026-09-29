@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { Fragment, useCallback, useEffect, useMemo, useState } from 'react'
 import { Link, useNavigate, useParams } from 'react-router-dom'
 import { check, supabase } from '../../lib/supabase.js'
 import { LETTERS, copyText, quizLink } from '../../lib/util.js'
@@ -6,6 +6,8 @@ import { parseQuestions } from '../../lib/parse.js'
 import { useToast } from '../../components/Toast.jsx'
 import QuizControls from '../../components/QuizControls.jsx'
 import MathText, { hasMath } from '../../components/MathText.jsx'
+import RichText, { hasRich, plainText } from '../../components/RichText.jsx'
+import ImageTextarea from '../../components/ImageTextarea.jsx'
 
 // <input type="datetime-local"> works in local time without seconds.
 const toLocalInput = (iso) => {
@@ -15,6 +17,12 @@ const toLocalInput = (iso) => {
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`
 }
 const fromLocalInput = (v) => (v ? new Date(v).toISOString() : null)
+// LRDI days: pre-quizzes open at 10 am, quizzes after the session at 6 pm. Admin can change the time.
+const PRE_TIME = '10:00'
+const POST_TIME = '18:00'
+const defaultTime = (dayType, part) => (
+  ['core', 'challenge'].includes(dayType) ? (part === 'post' ? POST_TIME : PRE_TIME)
+    : dayType === 'surprise' ? PRE_TIME : '')
 
 export default function QuizEditor() {
   const { id } = useParams()
@@ -32,6 +40,10 @@ export default function QuizEditor() {
   const [invites, setInvites] = useState([])
   const [keyId, setKeyId] = useState(null)
   const [names, setNames] = useState({ batches: [], topics: [] })
+  const [programs, setPrograms] = useState([])
+  useEffect(() => {
+    supabase.from('programs').select('name, roster_only').order('name').then(({ data }) => setPrograms(data || []))
+  }, [])
   useEffect(() => {
     // existing batch and topic names, suggested so the same batch is not typed three different ways
     supabase.from('quizzes').select('batch, topic').then(({ data }) => {
@@ -61,14 +73,20 @@ export default function QuizEditor() {
         show: q.show_score,
         review: q.show_review,
         access: q.access || 'open',
+        program: q.program || 'FYQ',
         batch: q.batch || '',
         topic: q.topic || '',
+        weekNo: q.week_no ? String(q.week_no) : '',
+        dayType: q.day_type || '',
+        dayNo: q.day_no ? String(q.day_no) : '',
+        part: q.part || '',
         inLib: q.in_library !== false,
         board: Boolean(q.show_leaderboard),
         practice: Boolean(q.allow_practice),
         shufQ: Boolean(q.shuffle_questions),
         shufO: Boolean(q.shuffle_options),
-        startsAt: toLocalInput(q.starts_at),
+        startDate: toLocalInput(q.starts_at).slice(0, 10),
+        startTime: toLocalInput(q.starts_at).slice(11, 16),
         endsAt: toLocalInput(q.ends_at),
       })
     } catch (e) {
@@ -96,8 +114,13 @@ export default function QuizEditor() {
     form.show !== quiz.show_score ||
     form.review !== quiz.show_review ||
     form.access !== (quiz.access || 'open') ||
+    form.program !== (quiz.program || 'FYQ') ||
     form.batch.trim() !== (quiz.batch || '') ||
     form.topic.trim() !== (quiz.topic || '') ||
+    form.weekNo !== (quiz.week_no ? String(quiz.week_no) : '') ||
+    form.dayType !== (quiz.day_type || '') ||
+    form.dayNo !== (quiz.day_no ? String(quiz.day_no) : '') ||
+    form.part !== (quiz.part || '') ||
     form.inLib !== (quiz.in_library !== false) ||
     form.board !== Boolean(quiz.show_leaderboard) ||
     form.practice !== Boolean(quiz.allow_practice) ||
@@ -105,7 +128,7 @@ export default function QuizEditor() {
     (draft && (
       form.shufQ !== Boolean(quiz.shuffle_questions) ||
       form.shufO !== Boolean(quiz.shuffle_options) ||
-      form.startsAt !== toLocalInput(quiz.starts_at) ||
+      (form.startDate && form.startTime ? `${form.startDate}T${form.startTime}` : '') !== toLocalInput(quiz.starts_at) ||
       form.code !== quiz.code ||
       Number(form.duration) !== quiz.duration_minutes ||
       Number(form.correct) !== Number(quiz.marks_correct) ||
@@ -113,10 +136,26 @@ export default function QuizEditor() {
       Number(form.wrongTita) !== Number(quiz.marks_wrong_tita)
     ))
   const set = (k) => (e) => setForm({ ...form, [k]: e.target.type === 'checkbox' ? e.target.checked : e.target.value })
-
+  // picking Pre-quiz or Quiz moves an untouched default time along with it
+  const setDay = (k) => (e) => {
+    const next = { ...form, [k]: e.target.value }
+    const was = defaultTime(form.dayType, form.part || 'pre')
+    const now = defaultTime(next.dayType, next.part || 'pre')
+    if (next.startDate && now && (!form.startTime || form.startTime === was || [PRE_TIME, POST_TIME].includes(form.startTime))) next.startTime = now
+    setForm(next)
+  }
+  const setDate = (e) => {
+    const v = e.target.value
+    setForm({ ...form, startDate: v, startTime: v && !form.startTime ? defaultTime(form.dayType, form.part || 'pre') : form.startTime })
+  }
   async function saveSettings(e) {
     e.preventDefault()
     setErr('')
+    if (form.weekNo && !(Number.isInteger(Number(form.weekNo)) && Number(form.weekNo) >= 1 && Number(form.weekNo) <= 500)) return setErr('Week number must be a whole number from 1 to 500.')
+    if (form.dayNo && !(Number.isInteger(Number(form.dayNo)) && Number(form.dayNo) >= 1 && Number(form.dayNo) <= 50)) return setErr('Day number must be a whole number from 1 to 50.')
+    if (['core', 'challenge', 'surprise', 'sectional'].includes(form.dayType) && !form.weekNo) return setErr('Give a week number for this day. Extra sectionals need no week.')
+    if (draft && form.startDate && !form.startTime) return setErr('Pick the start time too.')
+    if (draft && !form.startDate && form.startTime) return setErr('Pick the start date too, or clear the time.')
     const patch = {
       title: form.title.trim() || 'Untitled quiz',
       instructions: form.instructions.trim() || null,
@@ -124,14 +163,19 @@ export default function QuizEditor() {
       show_review: form.review,
       access: form.access,
       show_leaderboard: form.board,
+      program: form.program,
       batch: form.batch.trim().replace(/\s+/g, ' ').slice(0, 60) || null,
       topic: form.topic.trim().replace(/\s+/g, ' ').slice(0, 60) || null,
       in_library: form.inLib,
+      week_no: form.dayType === 'extra' ? null : form.weekNo ? Number(form.weekNo) : null,
+      day_type: form.dayType || null,
+      day_no: form.dayType === 'sectional' ? null : form.dayType ? Number(form.dayNo || 1) : null,
+      part: ['core', 'challenge'].includes(form.dayType) ? (form.part || 'pre') : form.dayType === 'surprise' ? 'pre' : null,
       allow_practice: form.practice,
     }
     if (quiz.status !== 'ended') patch.ends_at = fromLocalInput(form.endsAt)
     if (draft) {
-      patch.starts_at = fromLocalInput(form.startsAt)
+      patch.starts_at = form.startDate && form.startTime ? fromLocalInput(`${form.startDate}T${form.startTime}`) : null
       patch.shuffle_questions = form.shufQ
       patch.shuffle_options = form.shufO
       if (patch.starts_at && patch.ends_at && new Date(patch.ends_at) <= new Date(patch.starts_at)) {
@@ -163,18 +207,43 @@ export default function QuizEditor() {
     }
   }
 
+  // sets pasted together are numbered 1, 2… in the paste; here they follow the quiz's existing sets
   async function addQuestions(rows) {
+    const base = qs.reduce((m, x) => Math.max(m, x.set_no || 0), 0)
     const start = qs.reduce((m, x) => Math.max(m, x.position), 0) + 1
-    const payload = rows.map((r, i) => ({ quiz_id: id, position: start + i, ...r }))
+    const payload = rows.map((r, i) => ({ quiz_id: id, position: start + i, ...r, set_no: r.set_no ? base + r.set_no : null, set_body: r.set_no ? r.set_body : null }))
     check(await supabase.from('questions').insert(payload))
     toast(rows.length === 1 ? 'Question added' : `${rows.length} questions added`)
     await load()
   }
+  // one question: a new set gets the next number; joining an existing set puts it right after that set's last question
+  async function addOne(row) {
+    if (row.set_no === 'new') row = { ...row, set_no: qs.reduce((m, x) => Math.max(m, x.set_no || 0), 0) + 1 }
+    const members = row.set_no ? qs.filter((x) => x.set_no === row.set_no) : []
+    if (members.length) {
+      const last = Math.max(...members.map((x) => x.position))
+      const after = qs.filter((x) => x.position > last).sort((a, b) => b.position - a.position)
+      for (const x of after) check(await supabase.from('questions').update({ position: x.position + 1 }).eq('id', x.id))
+      check(await supabase.from('questions').insert({ quiz_id: id, position: last + 1, ...row }))
+      toast('Question added')
+      return load()
+    }
+    check(await supabase.from('questions').insert({ quiz_id: id, position: qs.reduce((m, x) => Math.max(m, x.position), 0) + 1, ...row }))
+    toast('Question added')
+    return load()
+  }
   async function updateQuestion(qid, row) {
+    if (row.set_no === 'new') row = { ...row, set_no: qs.reduce((m, x) => Math.max(m, x.set_no || 0), 0) + 1 }
     check(await supabase.from('questions').update(row).eq('id', qid))
     toast('Question saved')
     await load()
   }
+  async function saveSet(no, text) {
+    check(await supabase.from('questions').update({ set_body: text }).eq('quiz_id', id).eq('set_no', no))
+    toast('Set saved')
+    await load()
+  }
+  const setList = [...new Map(qs.filter((x) => x.set_no).map((x) => [x.set_no, x.set_body])).entries()].map(([no, body]) => ({ no, body }))
   async function saveExplanation(qid) {
     try {
       check(await supabase.from('questions').update({ explanation: expText.trim() || null }).eq('id', qid))
@@ -281,6 +350,15 @@ export default function QuizEditor() {
             <span>Code</span>
             <input className="input codechip" value={form.code} onChange={(e) => setForm({ ...form, code: e.target.value.toUpperCase().replace(/[^A-Z0-9]/g, '') })} disabled={!draft} maxLength={12} />
           </label>
+          <label className="field" style={{ maxWidth: 340 }}>
+            <span>Program</span>
+            <select className="input" value={form.program} onChange={set('program')}>
+              {(programs.length ? programs : [{ name: form.program }]).map((p) => (
+                <option key={p.name} value={p.name}>{p.name}{p.roster_only ? ' (listed students only)' : ''}</option>
+              ))}
+            </select>
+            <small>Listed-students programs only let emails on their list start this quiz. Manage lists under Programs.</small>
+          </label>
           <div className="grid2">
             <label className="field">
               <span>Batch</span>
@@ -293,9 +371,60 @@ export default function QuizEditor() {
               <datalist id="topic-list">{names.topics.map((b) => <option key={b} value={b} />)}</datalist>
             </label>
           </div>
+          <fieldset className="field" style={{ border: 0, padding: 0, margin: 0 }}>
+            <legend style={{ fontWeight: 700, marginBottom: 8 }}>Week and day (LRDI style, optional)</legend>
+            <div className="grid2">
+              <label className="field">
+                <span>Day type</span>
+                <select className="input" value={form.dayType} onChange={setDay('dayType')}>
+                  <option value="">None</option>
+                  <option value="core">Core day</option>
+                  <option value="challenge">Challenge day</option>
+                  <option value="surprise">Surprise day</option>
+                  <option value="sectional">Weekly sectional</option>
+                  <option value="extra">Extra sectional (outside weeks)</option>
+                </select>
+              </label>
+              {['core', 'challenge'].includes(form.dayType) && (
+                <label className="field">
+                  <span>Which one</span>
+                  <select className="input" value={form.part || 'pre'} onChange={setDay('part')}>
+                    <option value="pre">Pre-quiz (before the session)</option>
+                    <option value="post">Quiz (after the session)</option>
+                  </select>
+                </label>
+              )}
+              {form.dayType === 'surprise' && (
+                <p className="muted small" style={{ alignSelf: 'end' }}>Surprise days have a pre-quiz only.</p>
+              )}
+            </div>
+            {form.dayType && (
+              <div className="grid2" style={{ marginTop: 12 }}>
+                {form.dayType !== 'extra' && (
+                  <label className="field">
+                    <span>Week number</span>
+                    <input className="input" type="number" min="1" max="500" step="1" value={form.weekNo} onChange={set('weekNo')} placeholder="e.g. 3" />
+                    <small>The week is named by its Topic, like Week 3 · Games.</small>
+                  </label>
+                )}
+                {form.dayType !== 'sectional' && (
+                  <label className="field">
+                    <span>{form.dayType === 'extra' ? 'Sectional number' : 'Day number'}</span>
+                    <input className="input" type="number" min="1" max="50" step="1" value={form.dayNo} onChange={set('dayNo')} placeholder="1" />
+                    <small>{form.dayType === 'extra' ? 'Extra Sectional 1, 2 and so on.' : 'Core Day 1, Core Day 2 and so on.'}</small>
+                  </label>
+                )}
+              </div>
+            )}
+            <small style={{ display: 'block', marginTop: 8 }}>
+              Pick the date under Schedule: pre-quizzes start at 10:00 am and quizzes at 6:00 pm unless you change the time.
+              In a week, each one opens for a student only after they submit the one before it (Core days, Challenge days, Surprise days, then the Sectional).
+              A Surprise day pre-quiz stays hidden (no title or time) until it goes live.
+            </small>
+          </fieldset>
           <label className="check">
             <input type="checkbox" checked={form.inLib} onChange={set('inLib')} disabled={!form.batch.trim()} />
-            <span>Show in the students' library. Students see it under this batch and topic: live quizzes to start, and their result once it ends. A student belongs to a batch once they attempt any quiz in it. Needs a batch.</span>
+            <span>Show in the students' library. Students see it under this batch and topic: live quizzes to start, and their result once it ends. Every identified student in this quiz's program sees it. Needs a batch.</span>
           </label>
 
           <fieldset className="field" style={{ border: 0, padding: 0, margin: 0 }}>
@@ -338,10 +467,19 @@ export default function QuizEditor() {
           <fieldset className="field" style={{ border: 0, padding: 0, margin: 0 }}>
             <legend style={{ fontWeight: 700, marginBottom: 8 }}>Schedule (optional)</legend>
             <div className="grid2">
-              <label className="field">
-                <span>Start automatically at</span>
-                <input className="input" type="datetime-local" value={form.startsAt} onChange={set('startsAt')} disabled={!draft} />
-              </label>
+              <div className="field">
+                <span id="start-lbl">Start automatically on</span>
+                <div className="row" style={{ flexWrap: 'nowrap', gap: 8 }}>
+                  <input className="input" type="date" aria-labelledby="start-lbl" value={form.startDate} onChange={setDate} disabled={!draft} />
+                  <input className="input" type="time" aria-label="Start time" value={form.startTime} onChange={set('startTime')} disabled={!draft} style={{ maxWidth: 140 }} />
+                </div>
+                {draft && (defaultTime(form.dayType, form.part || 'pre') || form.startDate || form.startTime) && (
+                  <small>
+                    {defaultTime(form.dayType, form.part || 'pre') && (form.dayType === 'surprise' || (form.part || 'pre') === 'pre' ? 'Pre-quiz: starts at 10:00 am by default. ' : 'Quiz: starts at 6:00 pm by default. ')}
+                    {(form.startDate || form.startTime) && <button type="button" className="link small" onClick={() => setForm({ ...form, startDate: '', startTime: '' })}>Clear start</button>}
+                  </small>
+                )}
+              </div>
               <label className="field">
                 <span>Close entry at</span>
                 <input className="input" type="datetime-local" value={form.endsAt} onChange={set('endsAt')} disabled={quiz.status === 'ended'} />
@@ -378,7 +516,8 @@ export default function QuizEditor() {
         {draft && editing === 'new' && (
           <QuestionForm
             onCancel={() => setEditing(null)}
-            onSave={async (row) => { await addQuestions([row]); setEditing(null) }}
+            sets={setList}
+            onSave={async (row) => { await addOne(row); setEditing(null) }}
           />
         )}
         {draft && bulk && (
@@ -391,19 +530,24 @@ export default function QuizEditor() {
         <div style={{ marginTop: 12 }}>
           {qs.length === 0 && !editing && !bulk && <p className="muted">No questions yet.</p>}
           {qs.map((q, i) => (
-            editing === q.id ? (
+            <Fragment key={q.id}>
+            {q.set_no && q.set_no !== qs[i - 1]?.set_no && (
+              <SetHead no={q.set_no} body={q.set_body} first={i + 1} count={(() => { let k = i; while (k < qs.length && qs[k].set_no === q.set_no) k++; return k - i })()} onSave={saveSet} locked={!draft} />
+            )}
+            {editing === q.id ? (
               <QuestionForm
                 key={q.id}
                 initial={q}
+                sets={setList}
                 onCancel={() => setEditing(null)}
                 onSave={async (row) => { await updateQuestion(q.id, row); setEditing(null) }}
               />
             ) : (
-              <div className="qrow" key={q.id}>
+              <div className={`qrow ${q.set_no ? 'inset' : ''}`}>
                 <span className="no">{i + 1}</span>
                 <div>
                   {q.bonus && <p className="chip" style={{ marginLeft: 0, marginBottom: 6 }}>Bonus, full marks to everyone</p>}
-                  <MathText as="p" style={{ whiteSpace: 'pre-wrap' }} text={q.body} />
+                  <RichText as="p" style={{ whiteSpace: 'pre-wrap' }} text={q.body} />
                   {q.kind === 'tita' ? (
                     <p className="accepted"><span className="muted">Type-in. Accepted </span><b>{q.accepted.join('  or  ')}</b></p>
                   ) : (
@@ -429,7 +573,7 @@ export default function QuizEditor() {
                     <div className="stack" style={{ marginTop: 12 }}>
                       <label className="field">
                         <span>Explanation</span>
-                        <textarea className="textarea" value={expText} onChange={(e) => setExpText(e.target.value)} autoFocus />
+                        <ImageTextarea value={expText} onChange={setExpText} autoFocus label="Explanation" preview />
                       </label>
                       <div className="row">
                         <button className="btn small" onClick={() => saveExplanation(q.id)}>Save explanation</button>
@@ -437,7 +581,7 @@ export default function QuizEditor() {
                       </div>
                     </div>
                   ) : (
-                    q.explanation && <MathText as="p" className="muted small" style={{ marginTop: 10, whiteSpace: 'pre-wrap' }} text={`Explanation. ${q.explanation}`} />
+                    q.explanation && <RichText as="p" className="muted small" style={{ marginTop: 10, whiteSpace: 'pre-wrap' }} text={`Explanation. ${q.explanation}`} />
                   )}
                 </div>
                 {!draft && expId !== q.id && keyId !== q.id && (
@@ -455,7 +599,8 @@ export default function QuizEditor() {
                   </div>
                 )}
               </div>
-            )
+            )}
+            </Fragment>
           ))}
         </div>
       </section>
@@ -622,18 +767,55 @@ function InviteList({ quizId, invites, onChange, live }) {
   )
 }
 
+// The shared passage of an LRDI set, shown once above its questions.
+function SetHead({ no, body, first, count, onSave, locked }) {
+  const [edit, setEdit] = useState(false)
+  const [text, setText] = useState(body || '')
+  const [err, setErr] = useState('')
+  const [busy, setBusy] = useState(false)
+  async function save() {
+    if (!text.trim()) return setErr('The passage cannot be empty.')
+    setBusy(true)
+    try { await onSave(no, text.trim()); setEdit(false) } catch (e) { setErr(e.message) } finally { setBusy(false) }
+  }
+  return (
+    <div className="sethead">
+      <div className="row between">
+        <p className="qmeta" style={{ margin: 0 }}><b>Set {no}</b> · {count === 1 ? `question ${first}` : `questions ${first} to ${first + count - 1}`}</p>
+        {!edit && <button className="link" onClick={() => { setText(body || ''); setErr(''); setEdit(true) }}>Edit set</button>}
+      </div>
+      {edit ? (
+        <div className="stack" style={{ marginTop: 10 }}>
+          {locked && <p className="muted small">The quiz has started. Fix typos only: students already working see the change when they reload.</p>}
+          <ImageTextarea value={text} onChange={setText} style={{ minHeight: 160 }} label={`Set ${no} passage`} autoFocus preview />
+          {err && <p className="error" role="alert">{err}</p>}
+          <div className="row">
+            <button className="btn small" onClick={save} disabled={busy}>{busy ? 'Saving' : 'Save set'}</button>
+            <button className="btn ghost small" onClick={() => setEdit(false)} disabled={busy}>Cancel</button>
+          </div>
+        </div>
+      ) : (
+        <RichText className="setbody" style={{ whiteSpace: 'pre-wrap', marginTop: 10 }} text={body} />
+      )}
+    </div>
+  )
+}
+
+const IMG_HELP = 'Pictures and charts: press Add image, paste a screenshot or drop a file. Tables: write rows like | Team | Won | with a bar at both ends.'
 const MATH_HELP = 'Maths: put it between $ signs, like $\\frac{3}{4}$, $x^2$, $\\sqrt{5}$, $a_n$, $\\pi r^2$, $\\le$, $\\ge$. Use $$ ... $$ for a line of its own. Plain money like $5 stays as text.'
 
 // Text answers match without regard to capitals, so drop repeats that differ only by case.
 const uniqueCI = (list) => { const seen = new Set(); return list.filter((x) => { const k = x.toLowerCase(); if (seen.has(k)) return false; seen.add(k); return true }) }
 
-function QuestionForm({ initial, onSave, onCancel }) {
+function QuestionForm({ initial, onSave, onCancel, sets = [] }) {
   const [kind, setKind] = useState(initial?.kind || 'mcq')
   const [body, setBody] = useState(initial?.body || '')
   const [opts, setOpts] = useState(initial?.kind !== 'tita' && initial?.options?.length ? [...initial.options] : ['', '', '', ''])
   const [correct, setCorrect] = useState(initial?.correct_index ?? 0)
   const [accepted, setAccepted] = useState(initial?.kind === 'tita' ? initial.accepted.join('\n') : '')
   const [expl, setExpl] = useState(initial?.explanation || '')
+  const [setNo, setSetNo] = useState(initial?.set_no ? String(initial.set_no) : '')
+  const [setText, setSetText] = useState('')
   const [err, setErr] = useState('')
   const [busy, setBusy] = useState(false)
 
@@ -648,19 +830,23 @@ function QuestionForm({ initial, onSave, onCancel }) {
     e.preventDefault()
     const b = body.trim()
     if (!b) return setErr('Write the question.')
+    if (setNo === 'new' && !setText.trim()) return setErr('Write the set passage, or choose No set.')
+    const inSet = setNo === 'new' ? { set_no: 'new', set_body: setText.trim() }
+      : setNo ? { set_no: Number(setNo), set_body: sets.find((x) => String(x.no) === setNo)?.body || '' }
+        : { set_no: null, set_body: null }
     let row
     if (kind === 'tita') {
       const list = uniqueCI(accepted.split('\n').map((x) => x.trim()).filter(Boolean))
       if (list.length === 0) return setErr('Add the accepted answer.')
       if (list.length > 10) return setErr('Use at most 10 accepted answers.')
       if (list.some((x) => x.length > 40)) return setErr('Each accepted answer can be up to 40 characters.')
-      row = { kind: 'tita', body: b, options: [], correct_index: null, accepted: list, explanation: expl.trim() || null }
+      row = { kind: 'tita', body: b, options: [], correct_index: null, accepted: list, explanation: expl.trim() || null, ...inSet }
     } else {
       const items = opts.map((t, i) => ({ t: t.trim(), c: i === correct })).filter((x) => x.t)
       if (items.length < 2) return setErr('Add at least two options.')
       const ci = items.findIndex((x) => x.c)
       if (ci < 0) return setErr('Mark the correct option. It cannot be empty.')
-      row = { kind: 'mcq', body: b, options: items.map((x) => x.t), correct_index: ci, accepted: null, explanation: expl.trim() || null }
+      row = { kind: 'mcq', body: b, options: items.map((x) => x.t), correct_index: ci, accepted: null, explanation: expl.trim() || null, ...inSet }
     }
     setBusy(true)
     try {
@@ -677,15 +863,30 @@ function QuestionForm({ initial, onSave, onCancel }) {
         <button type="button" role="radio" aria-checked={kind === 'mcq'} onClick={() => setKind('mcq')}>Multiple choice</button>
         <button type="button" role="radio" aria-checked={kind === 'tita'} onClick={() => setKind('tita')}>Type-in</button>
       </div>
-      <label className="field">
-        <span>Question</span>
-        <textarea className="textarea" value={body} onChange={(e) => setBody(e.target.value)} autoFocus />
-        <small>{MATH_HELP}</small>
+      <label className="field" style={{ maxWidth: 420 }}>
+        <span>Set (LRDI)</span>
+        <select className="input" value={setNo} onChange={(e) => setSetNo(e.target.value)}>
+          <option value="">No set, a question on its own</option>
+          {sets.map((x) => <option key={x.no} value={String(x.no)}>Set {x.no}: {plainText(x.body).replace(/\s+/g, ' ').slice(0, 50)}</option>)}
+          <option value="new">New set…</option>
+        </select>
+        <small>Questions in a set share one passage, chart or table. Students see it beside each question.</small>
       </label>
-      {(hasMath(body) || opts.some(hasMath)) && (
+      {setNo === 'new' && (
+        <div className="field">
+          <span>Set passage</span>
+          <ImageTextarea value={setText} onChange={setSetText} style={{ minHeight: 140 }} label="Set passage" placeholder="Directions, data, a chart or a table that the questions of this set use." preview />
+        </div>
+      )}
+      <div className="field">
+        <span>Question</span>
+        <ImageTextarea value={body} onChange={setBody} autoFocus label="Question" />
+        <small>{MATH_HELP} {IMG_HELP}</small>
+      </div>
+      {(hasMath(body) || opts.some(hasMath) || hasRich(body)) && (
         <div className="mathpreview">
-          <p className="muted small">Preview</p>
-          <MathText as="p" style={{ whiteSpace: 'pre-wrap' }} text={body} />
+          <p className="muted small">Preview of the question</p>
+          <RichText as="p" style={{ whiteSpace: 'pre-wrap' }} text={body} />
           {kind === 'mcq' && opts.filter((o) => o.trim()).map((o, i) => <p key={i}><b>{LETTERS[i]}</b> <MathText text={o} /></p>)}
         </div>
       )}
@@ -711,11 +912,11 @@ function QuestionForm({ initial, onSave, onCancel }) {
           {opts.length < 6 && <p style={{ marginTop: 10 }}><button type="button" className="link" onClick={() => setOpts([...opts, ''])}>Add option</button></p>}
         </fieldset>
       )}
-      <label className="field">
+      <div className="field">
         <span>Explanation (optional)</span>
-        <textarea className="textarea" style={{ minHeight: 72 }} value={expl} onChange={(e) => setExpl(e.target.value)} />
+        <ImageTextarea style={{ minHeight: 72 }} value={expl} onChange={setExpl} label="Explanation" preview />
         <small>Students see this in the answer review after they submit.</small>
-      </label>
+      </div>
       {err && <p className="error" role="alert">{err}</p>}
       <div className="row">
         <button className="btn small" disabled={busy}>{busy ? 'Saving' : 'Save question'}</button>
@@ -741,7 +942,20 @@ Ans: C
 
 Q3. What is 6 x 7?
 Ans: 42
-Exp: Six sevens make forty two.`
+Exp: Six sevens make forty two.
+
+Set: Five teams play each other once. The table shows the wins.
+| Team | Won |
+|------|-----|
+| A    | 3   |
+| B    | 2   |
+Q4. How many matches are played in all?
+Ans: 10
+Q5. Which team won the most?
+A) A
+B) B
+Ans: A
+End set`
 
 function BulkImport({ onAdd, onCancel }) {
   const [text, setText] = useState('')
@@ -762,14 +976,16 @@ function BulkImport({ onAdd, onCancel }) {
 
   return (
     <div className="qform stack">
-      <label className="field">
+      <div className="field">
         <span>Paste questions</span>
-        <textarea className="textarea" style={{ minHeight: 220 }} value={text} onChange={(e) => setText(e.target.value)} placeholder={SAMPLE} autoFocus />
-        <small>One block per question. Multiple choice needs lettered options and an Ans line with the letter. A type-in question has no options, just Ans with the value. Put alternatives on one line with a bar, like Ans: 3.5 | 7/2. A one-letter type-in answer goes in quotes, like Ans: "C". Write lettered statements as (i), (ii) so they are not read as options. Add an optional Exp line after Ans for the explanation. {MATH_HELP}</small>
-      </label>
+        <ImageTextarea style={{ minHeight: 260 }} value={text} onChange={setText} placeholder={SAMPLE} autoFocus label="Paste questions" />
+        <small>One block per question. Multiple choice needs lettered options and an Ans line with the letter. A type-in question has no options, just Ans with the value. Put alternatives on one line with a bar, like Ans: 3.5 | 7/2. A one-letter type-in answer goes in quotes, like Ans: "C". Write lettered statements as (i), (ii) so they are not read as options. Add an optional Exp line after Ans for the explanation.
+          {' '}LRDI sets: start with a line Set: (or Directions), then the passage, pictures and tables, then the questions numbered Q1., Q2. End with End set, or start the next Set.
+          {' '}{MATH_HELP} {IMG_HELP}</small>
+      </div>
       {text.trim() && (
         <div>
-          <p><b>{parsed.questions.length}</b> ready to add.</p>
+          <p><b>{parsed.questions.length}</b> ready to add{parsed.sets ? `, in ${parsed.sets} ${parsed.sets === 1 ? 'set' : 'sets'} and ${parsed.questions.filter((x) => !x.set_no).length} on their own` : ''}.</p>
           {parsed.errors.length > 0 && (
             <ul className="error" style={{ margin: '8px 0 0', paddingLeft: 20 }}>
               {parsed.errors.map((e, i) => <li key={i}>{e}</li>)}
@@ -777,6 +993,7 @@ function BulkImport({ onAdd, onCancel }) {
           )}
         </div>
       )}
+      {parsed.questions.length > 0 && <BulkPreview questions={parsed.questions} />}
       {err && <p className="error" role="alert">{err}</p>}
       <div className="row">
         <button className="btn small" onClick={add} disabled={busy || parsed.questions.length === 0 || parsed.errors.length > 0}>
@@ -785,5 +1002,31 @@ function BulkImport({ onAdd, onCancel }) {
         <button className="btn ghost small" onClick={onCancel} disabled={busy}>Cancel</button>
       </div>
     </div>
+  )
+}
+// What Paste many will add, laid out the way it is stored: each set's passage once, then its questions.
+function BulkPreview({ questions }) {
+  return (
+    <details className="bulkprev" open>
+      <summary>Preview ({questions.length} {questions.length === 1 ? 'question' : 'questions'})</summary>
+      {questions.map((q, i) => (
+        <Fragment key={i}>
+          {q.set_no && q.set_no !== questions[i - 1]?.set_no && (
+            <div className="sethead"><p className="qmeta" style={{ margin: 0 }}><b>Set {q.set_no}</b> (new)</p><RichText className="setbody" style={{ whiteSpace: 'pre-wrap', marginTop: 10 }} text={q.set_body} /></div>
+          )}
+          <div className={`qrow ${q.set_no ? 'inset' : ''}`}>
+            <span className="no">{i + 1}</span>
+            <div>
+              <RichText as="p" style={{ whiteSpace: 'pre-wrap' }} text={q.body} />
+              {q.kind === 'tita'
+                ? <p className="accepted"><span className="muted">Type-in. Accepted </span><b>{q.accepted.join('  or  ')}</b></p>
+                : <ol>{q.options.map((o, k) => <li key={k} className={k === q.correct_index ? 'right' : ''}><b>{LETTERS[k]}</b><MathText text={o} /></li>)}</ol>}
+              {q.explanation && <RichText as="p" className="muted small" style={{ marginTop: 10, whiteSpace: 'pre-wrap' }} text={`Explanation. ${q.explanation}`} />}
+            </div>
+            <span />
+          </div>
+        </Fragment>
+      ))}
+    </details>
   )
 }

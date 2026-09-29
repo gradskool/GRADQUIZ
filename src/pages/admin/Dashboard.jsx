@@ -18,6 +18,12 @@ function sharedPrefix(list) {
 }
 
 const statusText = { draft: 'Draft', live: 'Live', ended: 'Ended' }
+const DAY_ORDER = { core: 0, challenge: 1, surprise: 2, sectional: 3, extra: 4 }
+const DAY_NAME = { core: 'Core', challenge: 'Challenge', surprise: 'Surprise' }
+const dayLabel = (x) => (
+  x.day_type === 'sectional' ? 'Sectional'
+    : x.day_type === 'extra' ? `Extra Sectional${x.day_no ? ` ${x.day_no}` : ''}`
+      : x.day_type ? `${DAY_NAME[x.day_type]} Day ${x.day_no || 1} · ${x.part === 'post' ? 'Quiz' : 'Pre-quiz'}` : '')
 const readTab = () => { try { return localStorage.getItem('gradquiz:admin:tab') || '' } catch { return '' } }
 
 export default function Dashboard() {
@@ -29,6 +35,7 @@ export default function Dashboard() {
   const [status, setStatus] = useState('all')
   const [q, setQ] = useState('')
   const [open, setOpen] = useState(() => new Set())
+  const [prog, setProg] = useState(() => { try { return localStorage.getItem('gradquiz:admin:view') || 'FYQ' } catch { return 'FYQ' } })
   const nav = useNavigate()
   const toast = useToast()
 
@@ -36,7 +43,7 @@ export default function Dashboard() {
     try {
       const data = check(await supabase
         .from('quizzes')
-        .select('id, code, title, status, access, starts_at, ends_at, started_at, batch, topic, duration_minutes, created_at, questions(count), attempts(count)')
+        .select('id, code, title, status, access, program, starts_at, ends_at, started_at, batch, topic, week_no, day_type, day_no, part, duration_minutes, created_at, questions(count), attempts(count)')
         .order('created_at', { ascending: false }))
       setQuizzes(data)
       const req = await supabase.from('attempts').select('quiz_id').not('link_requested_at', 'is', null)
@@ -61,14 +68,23 @@ export default function Dashboard() {
     setBusy(true)
     setErr('')
     for (let i = 0; i < 5; i++) {
-      const { data, error } = await supabase.from('quizzes').insert({ code: makeCode(), title: 'Untitled quiz' }).select('id').single()
+      const { data, error } = await supabase.from('quizzes').insert({ code: makeCode(), title: 'Untitled quiz', program: currentProg }).select('id').single()
       if (!error) { nav(`/admin/quiz/${data.id}`); return }
       if (!/quizzes_code_key|duplicate/i.test(error.message)) { setErr(error.message); break }
     }
     setBusy(false)
   }
 
-  const all = quizzes || []
+  const everything = quizzes || []
+  const progs = [...new Set(everything.map((x) => x.program || 'FYQ'))].sort((a, b) => (a === 'FYQ' ? -1 : b === 'FYQ' ? 1 : a.localeCompare(b)))
+  const currentProg = progs.includes(prog) ? prog : progs[0] || 'FYQ'
+  const all = everything.filter((x) => (x.program || 'FYQ') === currentProg)
+  function pickProg(p) {
+    setProg(p)
+    setTab(null)
+    setStatus('all')
+    try { localStorage.setItem('gradquiz:admin:view', p) } catch { /* ignore */ }
+  }
   const live = all.filter((x) => x.status === 'live')
   const upcoming = all.filter((x) => x.status === 'draft' && x.starts_at).sort((a, b) => String(a.starts_at).localeCompare(String(b.starts_at)))
   const drafts = all.filter((x) => x.status === 'draft' && !x.starts_at)
@@ -104,7 +120,7 @@ export default function Dashboard() {
 
   const search = q.trim().toLowerCase()
   const matches = search
-    ? all.filter((x) => [x.title, x.code, x.batch, x.topic].some((v) => String(v || '').toLowerCase().includes(search)))
+    ? everything.filter((x) => [x.title, x.code, x.batch, x.topic, x.program].some((v) => String(v || '').toLowerCase().includes(search)))
     : []
 
   const inTab = tab === NO_BATCH ? unbatched : all.filter((x) => x.batch && x.batch.toLowerCase() === String(tab).toLowerCase())
@@ -112,25 +128,28 @@ export default function Dashboard() {
   const topics = useMemo(() => {
     const m = new Map()
     for (const x of filtered) {
-      const k = x.topic || 'No topic'
+      const k = x.week_no ? `Week ${x.week_no} · ${x.topic || ''}` : x.day_type === 'extra' ? 'Extra sectionals' : x.topic || 'No topic'
       if (!m.has(k)) m.set(k, [])
       m.get(k).push(x)
     }
     return [...m.entries()].map(([name, list]) => ({
       name,
-      list,
+      week: list[0].week_no || 0,
+      list: list[0].week_no || list[0].day_type === 'extra'
+        ? [...list].sort((a, b) => (DAY_ORDER[a.day_type] ?? 9) - (DAY_ORDER[b.day_type] ?? 9) || (a.day_no || 0) - (b.day_no || 0) || (a.part === 'post' ? 1 : 0) - (b.part === 'post' ? 1 : 0))
+        : list,
       live: list.filter((x) => x.status === 'live').length,
       draft: list.filter((x) => x.status === 'draft').length,
       attempts: list.reduce((a, x) => a + (x.attempts?.[0]?.count ?? 0), 0),
       latest: list.reduce((m2, x) => (String(x.created_at) > m2 ? String(x.created_at) : m2), ''),
-    })).sort((a, b) => b.latest.localeCompare(a.latest))
+    })).sort((a, b) => b.week - a.week || b.latest.localeCompare(a.latest))
   }, [filtered])
   const toggle = (k) => setOpen((s) => { const n = new Set(s); n.has(k) ? n.delete(k) : n.add(k); return n })
   const count = (s) => inTab.filter((x) => s === 'all' || x.status === s).length
 
   // inside a batch tab the batch and topic are already on screen, elsewhere they are shown on each row
   const row = (x, plain) => (
-    <QuizRow key={x.id} x={x} asks={asks[x.id]} where={plain || !x.batch ? '' : `${short(x.batch)}${x.topic ? ` › ${x.topic}` : ''}`}
+    <QuizRow key={x.id} x={x} asks={asks[x.id]} where={plain ? '' : [search && progs.length > 1 ? x.program : '', x.batch ? `${short(x.batch)}${x.topic ? ` › ${x.topic}` : ''}` : ''].filter(Boolean).join(' · ')}
       onCopy={async () => { await copyText(quizLink(x.code)); toast('Link copied') }} />
   )
 
@@ -138,7 +157,10 @@ export default function Dashboard() {
     <main className="page">
       <div className="row between">
         <h1>Quizzes</h1>
-        <button className="btn" onClick={create} disabled={busy}>New quiz</button>
+        <div className="row">
+          <Link className="btn ghost" to={`/admin/new-week?program=${encodeURIComponent(currentProg)}${tab && tab !== 'now' && tab !== 'drafts' && tab !== NO_BATCH ? `&batch=${encodeURIComponent(tab)}` : ''}`}>New week</Link>
+          <button className="btn" onClick={create} disabled={busy}>New quiz</button>
+        </div>
       </div>
       {err && <p className="error" role="alert" style={{ marginTop: 16 }}>{err}</p>}
 
@@ -152,14 +174,24 @@ export default function Dashboard() {
         <>
           <div className="row between" style={{ alignItems: 'flex-end' }}>
             <p className="muted small">
-              {all.length} quizzes · {live.length} live · {upcoming.length} scheduled · {all.filter((x) => x.status === 'draft').length} drafts
+              {progs.length > 1 && <b>{currentProg}: </b>}{all.length} quizzes · {live.length} live · {upcoming.length} scheduled · {all.filter((x) => x.status === 'draft').length} drafts
             </p>
             <input className="input" style={{ width: 280 }} value={q} onChange={(e) => setQ(e.target.value)} placeholder="Search title, code, batch, topic" aria-label="Search quizzes" />
           </div>
 
+          {progs.length > 1 && !search && (
+            <div className="progtabs" role="tablist" aria-label="Program">
+              {progs.map((p) => (
+                <button key={p} type="button" role="tab" aria-selected={p === currentProg} onClick={() => pickProg(p)}>
+                  {p} <span>{everything.filter((x) => (x.program || 'FYQ') === p).length}</span>
+                  {everything.some((x) => (x.program || 'FYQ') === p && x.status === 'live') && <span className="livedot" aria-hidden="true" style={{ marginLeft: 8, marginRight: 0 }} />}
+                </button>
+              ))}
+            </div>
+          )}
           {search ? (
             <section style={{ marginTop: 20 }}>
-              <p className="qmeta">{matches.length} {matches.length === 1 ? 'match' : 'matches'} across all quizzes</p>
+              <p className="qmeta">{matches.length} {matches.length === 1 ? 'match' : 'matches'} across all programs</p>
               <ul className="alist">{matches.map((x) => row(x))}</ul>
             </section>
           ) : (
@@ -224,6 +256,12 @@ export default function Dashboard() {
                             <span />
                             <span className="chev" aria-hidden="true">{isOpen ? '−' : '+'}</span>
                           </button>
+                          {isOpen && t.week > 0 && (
+                            <p className="weeklinks">
+                              <Link to={`/admin/progress?program=${encodeURIComponent(currentProg)}&batch=${encodeURIComponent(tab)}&week=${t.week}`}>Week progress</Link>
+                              <Link to={`/admin/new-week?program=${encodeURIComponent(currentProg)}&batch=${encodeURIComponent(tab)}`}>Add days to a week</Link>
+                            </p>
+                          )}
                           {isOpen && <ul className="alist">{t.list.map((x) => row(x, true))}</ul>}
                         </div>
                       )
@@ -245,11 +283,12 @@ function QuizRow({ x, asks, where, onCopy }) {
   return (
     <li>
       <div className="amain">
+        {x.day_type && <span className={`daychip d-${x.day_type}`}>{x.week_no ? `Week ${x.week_no} · ` : ''}{dayLabel(x)}</span>}
         <Link to={`/admin/quiz/${x.id}`}><b>{x.title}</b></Link>
         <span className="muted small">
           {where && <>{where} · </>}
           <span className="codechip small">{x.code}</span>
-          {' · '}{qn} questions · {an} {an === 1 ? 'attempt' : 'attempts'}
+          {' · '}{qn} {qn === 1 ? 'question' : 'questions'} · {an} {an === 1 ? 'attempt' : 'attempts'}
         </span>
         <span className="achips">
           {x.access === 'invited' && <span className="chip" style={{ marginLeft: 0 }}>Invited only</span>}

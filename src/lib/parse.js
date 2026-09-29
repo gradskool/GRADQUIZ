@@ -10,6 +10,12 @@
 //   Ans: 42
 //   Alternatives go on the same line with a bar, like  Ans: 3.5 | 7/2
 //   A type-in answer that is a single letter goes in quotes, like  Ans: "C"
+// LRDI sets: a passage (directions, data, a chart, a table) shared by the questions after it
+//   Set: Six friends A to F sit around a round table...      (or a line starting with Directions)
+//   more lines of the passage, pictures, | tables |
+//   Q1. Who sits opposite A?        inside a set, start questions with Q1., Q2. so numbered data lines stay in the passage
+//   ...
+//   End set                         optional; the next Set line also ends it
 // Options must be lettered in order, A) B) C). Lettered statements inside the question
 // (A. ... B. ...) are caught instead of being read as options. Write those as (i), (ii) or 1., 2.
 const OPTION = /^\(?([A-Fa-f])[).:]\s+(.*\S)\s*$/
@@ -17,12 +23,23 @@ const ANS_LETTER = /^(?:ans(?:wer)?|correct)\s*[:\-=]?\s*\(?([A-Fa-f])\)?\s*$/i
 const ANS_TEXT = /^(?:ans(?:wer)?|correct)\s*[:=\-]\s*(.+?)\s*$/i
 const EXP = /^(?:exp(?:lanation)?|sol(?:ution)?)\s*[:=\-]\s*(.*?)\s*$/i
 const QPREFIX = /^(?:q\s*\d*\s*[:.)]|\d+\s*[.)])\s*/i
+const QSTRICT = /^q\s*\d*\s*[:.)]\s*/i
+const SETSTART = /^(?:set\s*\d*\s*[:.\-–]\s*(.*)|(directions?\b.*))$/i
+const SETEND = /^end\s*(?:of\s*)?(?:the\s*)?set\s*\.?$/i
 
 export function parseQuestions(text) {
   const questions = []
   const errors = []
   let cur = null
   let n = 0
+  let set = null // the open set: { no, body, count, inBody }
+  let sets = 0
+  const bodies = {}
+  const endSet = () => {
+    if (set && set.count === 0) errors.push(`Set ${set.no}: has no questions. Start them with Q1., Q2. and so on.`)
+    if (set) bodies[set.no] = set.body.replace(/^\n+|\n+$/g, '')
+    set = null
+  }
 
   const fail = (msg) => errors.push(`Question ${n}: ${msg}`)
   const close = () => {
@@ -32,12 +49,12 @@ export function parseQuestions(text) {
     else if (cur.problem) fail(cur.problem)
     else if (cur.accepted) {
       if (cur.accepted.some((a) => a.length > 40)) fail('an accepted answer is longer than 40 characters.')
-      else questions.push({ kind: 'tita', body: cur.body, options: [], correct_index: null, accepted: cur.accepted, explanation })
+      else questions.push({ kind: 'tita', body: cur.body, options: [], correct_index: null, accepted: cur.accepted, explanation, set_no: cur.set })
     } else if (cur.options.length < 2) fail('needs at least two options, or a type-in answer like "Ans: 42".')
     else if (cur.answer == null) fail('has no answer line. Add a line like "Ans: B".')
     else if (cur.options.length > 6) fail('has more than 6 options.')
     else if (cur.answer >= cur.options.length) fail('the answer letter has no matching option.')
-    else questions.push({ kind: 'mcq', body: cur.body, options: cur.options, correct_index: cur.answer, accepted: null, explanation })
+    else questions.push({ kind: 'mcq', body: cur.body, options: cur.options, correct_index: cur.answer, accepted: null, explanation, set_no: cur.set })
     cur = null
   }
 
@@ -45,6 +62,7 @@ export function parseQuestions(text) {
     const line = raw.trim()
     if (!line) {
       if (cur && cur.done) cur.inExp = false // a blank line ends an explanation
+      if (set && set.inBody && set.body) set.body += '\n'
       continue
     }
 
@@ -52,8 +70,23 @@ export function parseQuestions(text) {
       // the answer line was seen, so only an explanation can still belong to this question
       const e = line.match(EXP)
       if (e) { cur.explanation = e[1]; cur.inExp = true; continue }
-      if (cur.inExp && !QPREFIX.test(line)) { cur.explanation += '\n' + line; continue }
+      if (cur.inExp && !QPREFIX.test(line) && !SETSTART.test(line) && !SETEND.test(line)) { cur.explanation += '\n' + line; continue }
       close()
+    }
+
+    if (SETEND.test(line)) { close(); endSet(); continue }
+    const ss = line.match(SETSTART)
+    if (ss && !(set && set.inBody)) {
+      close()
+      endSet()
+      sets += 1
+      set = { no: sets, body: (ss[1] ?? ss[2] ?? '').trim(), count: 0, inBody: true }
+      continue
+    }
+    if (set && set.inBody) {
+      if (!QSTRICT.test(line)) { set.body += (set.body && !set.body.endsWith('\n') ? '\n' : '') + line; continue }
+      set.inBody = false
+      if (!set.body.trim()) errors.push(`Set ${set.no}: the passage is empty.`)
     }
 
     const letter = line.match(ANS_LETTER)
@@ -95,7 +128,8 @@ export function parseQuestions(text) {
     if (!cur || (startsQ && cur.options.length > 0)) {
       if (cur) close()
       n += 1
-      cur = { body: line.replace(QPREFIX, '').trim(), options: [], answer: null, accepted: null, problem: null, explanation: null, done: false, inExp: false, numbered: false }
+      cur = { body: line.replace(QPREFIX, '').trim(), options: [], answer: null, accepted: null, problem: null, explanation: null, done: false, inExp: false, numbered: false, set: set ? set.no : null }
+      if (set) set.count += 1
     } else if (cur.options.length === 0) {
       if (startsQ && /^\d/.test(line)) cur.numbered = true
       cur.body += (cur.body ? '\n' : '') + line.replace(QPREFIX, '')
@@ -104,5 +138,6 @@ export function parseQuestions(text) {
     }
   }
   close()
-  return { questions, errors }
+  endSet()
+  return { questions: questions.map((q) => ({ ...q, set_no: q.set_no || null, set_body: q.set_no ? bodies[q.set_no] : null })), errors, sets }
 }

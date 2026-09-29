@@ -1,6 +1,7 @@
 import { Fragment, useCallback, useEffect, useMemo, useState } from 'react'
 import { Link, useParams } from 'react-router-dom'
 import { check, rpc, supabase } from '../../lib/supabase.js'
+import { plainText } from '../../components/RichText.jsx'
 import { LETTERS, copyText, downloadCsv, formatWhen, num, spoken } from '../../lib/util.js'
 import { useToast } from '../../components/Toast.jsx'
 import QuizControls from '../../components/QuizControls.jsx'
@@ -308,7 +309,7 @@ export default function Results() {
                   const pct = Math.round((right / submitted.length) * 100)
                   return (
                     <tr key={q.id}>
-                      <td style={{ maxWidth: 380 }}><b>{i + 1}.</b> {q.body.length > 90 ? q.body.slice(0, 90) + '...' : q.body}</td>
+                      <td style={{ maxWidth: 380 }}><b>{i + 1}.</b> {(() => { const t = plainText(q.body).replace(/\s+/g, ' '); return t.length > 90 ? t.slice(0, 90) + '...' : t })()}</td>
                       <td><div className="bar-cell"><div className="meter"><i style={{ width: `${pct}%` }} /></div><span>{pct}%</span></div></td>
                       <td className="n">{wrong}</td>
                       <td className="n">{skipped}</td>
