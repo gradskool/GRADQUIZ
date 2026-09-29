@@ -87,7 +87,7 @@ begin
     'starts_at', case when q.status = 'draft' then q.starts_at end,
     'ends_at', case when q.status <> 'ended' then q.ends_at end,
     'server_now', now(),
-    'practice', (q.allow_practice and q.status = 'ended' and q.access = 'open'),
+    'practice', false,
     'duration_minutes', q.duration_minutes,
     'marks_correct', q.marks_correct,
     'marks_wrong', q.marks_wrong,
@@ -98,8 +98,7 @@ end $$;
 
 -- ---------- 2. practice ----------
 
--- Who may practise: a student with their own submitted attempt, or anyone with the code once an open quiz has ended.
--- Invited only quizzes need the student's own attempt.
+-- Only a student with their own submitted attempt may practise.
 create or replace function public._practice_quiz(p_code text, p_attempt uuid, p_token uuid) returns uuid
 language plpgsql security definer set search_path = public as $$
 declare q quizzes%rowtype;
@@ -111,7 +110,6 @@ begin
        select 1 from attempts where id = p_attempt and token = p_token and quiz_id = q.id and status = 'submitted') then
     return q.id;
   end if;
-  if q.status = 'ended' and q.access = 'open' then return q.id; end if;
   raise exception 'PRACTICE_NOT_OPEN';
 end $$;
 

@@ -31,6 +31,15 @@ export default function QuizEditor() {
   const [expText, setExpText] = useState('')
   const [invites, setInvites] = useState([])
   const [keyId, setKeyId] = useState(null)
+  const [names, setNames] = useState({ batches: [], topics: [] })
+  useEffect(() => {
+    // existing batch and topic names, suggested so the same batch is not typed three different ways
+    supabase.from('quizzes').select('batch, topic').then(({ data }) => {
+      if (!data) return
+      const uniq = (k) => [...new Set(data.map((r) => r[k]).filter(Boolean))].sort((a, b) => a.localeCompare(b))
+      setNames({ batches: uniq('batch'), topics: uniq('topic') })
+    })
+  }, [])
 
   const load = useCallback(async () => {
     try {
@@ -52,6 +61,9 @@ export default function QuizEditor() {
         show: q.show_score,
         review: q.show_review,
         access: q.access || 'open',
+        batch: q.batch || '',
+        topic: q.topic || '',
+        inLib: q.in_library !== false,
         board: Boolean(q.show_leaderboard),
         practice: Boolean(q.allow_practice),
         shufQ: Boolean(q.shuffle_questions),
@@ -84,6 +96,9 @@ export default function QuizEditor() {
     form.show !== quiz.show_score ||
     form.review !== quiz.show_review ||
     form.access !== (quiz.access || 'open') ||
+    form.batch.trim() !== (quiz.batch || '') ||
+    form.topic.trim() !== (quiz.topic || '') ||
+    form.inLib !== (quiz.in_library !== false) ||
     form.board !== Boolean(quiz.show_leaderboard) ||
     form.practice !== Boolean(quiz.allow_practice) ||
     (quiz.status !== 'ended' && form.endsAt !== toLocalInput(quiz.ends_at)) ||
@@ -109,6 +124,9 @@ export default function QuizEditor() {
       show_review: form.review,
       access: form.access,
       show_leaderboard: form.board,
+      batch: form.batch.trim().replace(/\s+/g, ' ').slice(0, 60) || null,
+      topic: form.topic.trim().replace(/\s+/g, ' ').slice(0, 60) || null,
+      in_library: form.inLib,
       allow_practice: form.practice,
     }
     if (quiz.status !== 'ended') patch.ends_at = fromLocalInput(form.endsAt)
@@ -263,6 +281,23 @@ export default function QuizEditor() {
             <span>Code</span>
             <input className="input codechip" value={form.code} onChange={(e) => setForm({ ...form, code: e.target.value.toUpperCase().replace(/[^A-Z0-9]/g, '') })} disabled={!draft} maxLength={12} />
           </label>
+          <div className="grid2">
+            <label className="field">
+              <span>Batch</span>
+              <input className="input" list="batch-list" value={form.batch} onChange={set('batch')} maxLength={60} placeholder="CAT 2026 Weekend" />
+              <datalist id="batch-list">{names.batches.map((b) => <option key={b} value={b} />)}</datalist>
+            </label>
+            <label className="field">
+              <span>Topic</span>
+              <input className="input" list="topic-list" value={form.topic} onChange={set('topic')} maxLength={60} placeholder="Algebra" />
+              <datalist id="topic-list">{names.topics.map((b) => <option key={b} value={b} />)}</datalist>
+            </label>
+          </div>
+          <label className="check">
+            <input type="checkbox" checked={form.inLib} onChange={set('inLib')} disabled={!form.batch.trim()} />
+            <span>Show in the students' library. Students see it under this batch and topic: live quizzes to start, and their result once it ends. A student belongs to a batch once they attempt any quiz in it. Needs a batch.</span>
+          </label>
+
           <fieldset className="field" style={{ border: 0, padding: 0, margin: 0 }}>
             <legend style={{ fontWeight: 700, marginBottom: 8 }}>Who can take this quiz</legend>
             <div className="kinds" role="radiogroup" aria-label="Who can take this quiz">
@@ -289,7 +324,7 @@ export default function QuizEditor() {
           </label>
           <label className="check">
             <input type="checkbox" checked={form.practice} onChange={set('practice')} />
-            <span>Let students practise again after they submit, untimed and not scored. Their first score and rank never change. Once an open quiz has ended, anyone with the code can practise it. Practice shows the answers.</span>
+            <span>Let students practise again after they submit, untimed and not scored. Their first score and rank never change. Only students who attempted can practise. Practice shows the answers.</span>
           </label>
           <label className="check">
             <input type="checkbox" checked={form.shufQ} onChange={set('shufQ')} disabled={!draft} />

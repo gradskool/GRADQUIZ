@@ -314,3 +314,38 @@ section.block > h2 { margin-bottom: 16px; }
 .opt .mathinline .katex, .rvopts .mathinline .katex, .mathpreview .katex { font-size: 1.2em; }
 .mathpreview { padding: 14px 16px; border-left: 4px solid var(--rule-strong); background: #fafafa; }
 .mathpreview > * + * { margin-top: 6px; }
+
+/* student progress on the home page */
+.progress { margin-top: 20px; padding: 20px 0 8px; border-bottom: 1px solid var(--rule); }
+.progress select { font: inherit; padding: 4px 6px; border: 1px solid var(--rule-strong); border-radius: 3px; background: var(--paper); }
+.progress .stats div b small { font-size: 0.55em; font-weight: 400; }
+.myrank { display: block; }
+
+/* student library */
+.libtabs { flex-wrap: wrap; }
+.libstrip { margin-top: 28px; padding: 18px 20px; background: var(--coral-wash); border-left: 5px solid var(--coral); }
+.libstrip.soon { background: #f6f6f6; border-left-color: var(--rule-strong); }
+.libstrip h2 { font-size: 1.2rem; }
+.libstrip ul { list-style: none; margin: 10px 0 0; padding: 0; }
+.libstrip li { display: flex; gap: 16px; align-items: center; justify-content: space-between; padding: 10px 0; border-top: 1px solid rgba(0, 0, 0, 0.08); }
+.libstrip li:first-child { border-top: 0; }
+.libstrip li div, .liblist .lmain { display: flex; flex-direction: column; min-width: 0; }
+.topics { margin-top: 18px; border-top: 1px solid var(--ink); }
+.topic { border-bottom: 1px solid var(--rule); }
+.topichead { width: 100%; display: grid; grid-template-columns: minmax(0, 1fr) auto 120px 24px; gap: 16px; align-items: center; padding: 16px 4px; background: none; border: 0; cursor: pointer; text-align: left; }
+.topichead:hover { background: #fafafa; }
+.topichead .tname { font-family: var(--serif); font-weight: 700; font-size: 1.2rem; }
+.topichead .meter { width: 120px; }
+.topichead .chev { font-size: 1.4rem; line-height: 1; text-align: center; }
+.liblist { list-style: none; margin: 0 0 12px; padding: 0; }
+.liblist li { display: grid; grid-template-columns: minmax(0, 1fr) auto auto; gap: 8px 20px; align-items: center; padding: 12px 4px 12px 16px; border-top: 1px solid var(--rule); }
+.liblist li.s-missed .lmain b { color: var(--muted); font-weight: 400; }
+.liblist .lscore { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.liblist .lpct { display: block; }
+@media (max-width: 640px) {
+  .topichead { grid-template-columns: minmax(0, 1fr) auto 24px; }
+  .topichead .meter { display: none; }
+  .liblist li { grid-template-columns: minmax(0, 1fr) auto; }
+  .liblist .lact { grid-column: 1 / -1; }
+  .liblist .lscore { text-align: right; }
+}

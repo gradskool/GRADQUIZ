@@ -30,7 +30,7 @@ const MESSAGES = {
   NOT_SET_UP: 'Email codes are not set up yet. Tell your instructor.',
   SERVER: 'Something went wrong on our side. Try again.',
   PRACTICE_OFF: 'Practice is not open for this quiz.',
-  PRACTICE_NOT_OPEN: 'Practice opens after you submit, or for everyone once the quiz has ended.',
+  PRACTICE_NOT_OPEN: 'Practice is only for students who attempted this quiz.',
   REPORT_NOT_AVAILABLE: 'The report is available once scores are shown.',
 }
 

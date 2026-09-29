@@ -54,6 +54,16 @@ export default function Home() {
   const [askDone, setAskDone] = useState(false)
   const [askErr, setAskErr] = useState('')
   const box = useRef(null)
+  const [progress, setProgress] = useState([])
+
+  // Overall numbers for every attempt this device holds. Only attempts whose secret matches come back.
+  const loadProgress = () => {
+    const saved = readSaved()
+    if (saved.length === 0) return
+    rpc('my_progress', { p_items: saved.map((x) => ({ a: x.a, t: x.t })) })
+      .then((rows) => setProgress(Array.isArray(rows) ? rows : []))
+      .catch(() => { /* the list still works without it */ })
+  }
 
   // results already on this device, no typing needed
   useEffect(() => {
@@ -66,7 +76,8 @@ export default function Home() {
         saved.filter((x) => !valid.has(x.a)).forEach((x) => { try { localStorage.removeItem(x.key) } catch { /* ignore */ } })
       })
       .catch(() => { /* leave the list empty, the form still works */ })
-  }, [])
+    loadProgress()
+  }, []) // eslint-disable-line react-hooks/exhaustive-deps
 
   async function go(e) {
     e.preventDefault()
@@ -125,6 +136,7 @@ export default function Home() {
       })
       setSearched(true)
       setPin('')
+      loadProgress()
     } catch (ex) {
       setFErr(ex.message)
     } finally {
@@ -132,9 +144,14 @@ export default function Home() {
     }
   }
 
+  const pmap = new Map(progress.map((r) => [r.attempt_id, r]))
+
   return (
     <>
-      <header className="bar"><Brand /></header>
+      <header className="bar">
+        <Brand />
+        <nav><Link to="/library">Your library</Link></nav>
+      </header>
       <main className="page">
         <div className="hero">
           <h1>Enter your quiz code.</h1>
@@ -162,9 +179,13 @@ export default function Home() {
           </form>
         </div>
 
-        {(open || items.length > 0) && (
+        {(open || items.length > 0 || progress.length > 0) && (
           <section className="myresults" ref={box} aria-labelledby="my-h">
-            <h2 id="my-h">Your results</h2>
+            <div className="row between" style={{ alignItems: 'baseline' }}>
+              <h2 id="my-h">Your results</h2>
+              <Link to="/library">Open your library, all quizzes by topic</Link>
+            </div>
+            {progress.length > 0 && <Progress rows={progress} />}
 
             {items.length > 0 && (
               <ul className="mylist">
@@ -177,6 +198,9 @@ export default function Home() {
                       </span>
                     </div>
                     <div className="myscore">
+                      {pmap.get(i.attempt_id)?.rank != null && (
+                        <span className="muted small myrank">Rank {pmap.get(i.attempt_id).rank} of {pmap.get(i.attempt_id).of} · {num(pmap.get(i.attempt_id).percentile)} pct</span>
+                      )}
                       {i.status === 'in_progress'
                         ? <span>In progress</span>
                         : i.score != null
@@ -221,14 +245,14 @@ export default function Home() {
                 <h3>No PIN, or forgot it?</h3>
                 <p className="muted small">
                   Quizzes taken before PINs were added have none. If you took the quiz on this phone or computer, it is listed above.
-                  Open it to set a PIN. Otherwise ask your instructor to send you your personal link.
+                  Open it to set a PIN. Otherwise ask your instructor to reset your PIN.
                 </p>
                 {askDone ? (
                   <div className="notice plain" role="status">
-                    Request sent. Your instructor will send you your personal link. Open it to see your result and set a PIN.
+                    Request sent. Your instructor will give you a new PIN. Then use Find all my results with your email and that PIN.
                   </div>
                 ) : !ask ? (
-                  <button className="btn ghost small" onClick={() => setAsk(true)}>Ask my instructor for my link</button>
+                  <button className="btn ghost small" onClick={() => setAsk(true)}>Ask my instructor to reset my PIN</button>
                 ) : (
                   <form className="stack" onSubmit={askInstructor} noValidate>
                     <div className="grid2">
@@ -254,5 +278,70 @@ export default function Home() {
         )}
       </main>
     </>
+  )
+}
+// Overall picture across every quiz this student has on this device or found with email + PIN.
+function Progress({ rows }) {
+  const emails = [...new Set(rows.map((r) => r.email))]
+  const [email, setEmail] = useState(() => {
+    const me = meEmail().toLowerCase()
+    return emails.includes(me) ? me : emails[0]
+  })
+  const mine = rows.filter((r) => r.email === (emails.includes(email) ? email : emails[0]))
+  if (mine.length === 0) return null
+
+  const n = mine.length
+  const avg = (f) => mine.reduce((a, r) => a + f(r), 0) / n
+  const avgPct = avg((r) => Number(r.percentile))
+  const avgScorePct = avg((r) => (Number(r.total_marks) ? (100 * Number(r.score)) / Number(r.total_marks) : 0))
+  const right = mine.reduce((a, r) => a + Number(r.correct || 0), 0)
+  const tried = mine.reduce((a, r) => a + Number(r.correct || 0) + Number(r.wrong || 0), 0)
+  const acc = tried ? (100 * right) / tried : null
+  const best = mine.reduce((b, r) => (b == null || Number(r.percentile) > Number(b.percentile) ? r : b), null)
+  const aboveAvg = mine.filter((r) => Number(r.score) > Number(r.class_avg)).length
+  const trend = [...mine].reverse()
+  const last = trend[trend.length - 1]
+  const prev = trend[trend.length - 2]
+  const change = prev ? Number(last.percentile) - Number(prev.percentile) : null
+
+  return (
+    <div className="progress">
+      <div className="row between" style={{ alignItems: 'baseline' }}>
+        <h3>Your progress</h3>
+        {emails.length > 1 && (
+          <label className="small muted">
+            For{' '}
+            <select value={email} onChange={(e) => setEmail(e.target.value)}>
+              {emails.map((e) => <option key={e} value={e}>{e}</option>)}
+            </select>
+          </label>
+        )}
+      </div>
+      <div className="stats" style={{ marginTop: 14 }}>
+        <div><b>{n}</b><span className="muted">{n === 1 ? 'quiz' : 'quizzes'}</span></div>
+        <div><b>{num(Math.round(avgPct * 10) / 10)}</b><span className="muted">average percentile</span></div>
+        <div><b>{Math.round(avgScorePct)}%</b><span className="muted">average score</span></div>
+        <div><b>{acc == null ? '-' : `${Math.round(acc)}%`}</b><span className="muted">accuracy</span></div>
+        <div><b>{best.rank}<small className="muted"> of {best.of}</small></b><span className="muted">best rank</span></div>
+      </div>
+      <p className="muted small" style={{ marginTop: 10 }}>
+        Above the class average in {aboveAvg} of {n}.
+        {change != null && ` Your latest percentile is ${change === 0 ? 'the same as' : `${Math.abs(Math.round(change))} points ${change > 0 ? 'higher' : 'lower'} than`} the one before.`}
+        {' '}Best: {num(best.percentile)} percentile in {best.title}.
+      </p>
+      {trend.length > 1 && (
+        <>
+          <p className="muted small" style={{ marginTop: 16 }}>Percentile, oldest to latest (latest in coral). Hover or tap a bar for the quiz.</p>
+          <div className="trend" style={{ height: 140, marginTop: 8 }} role="img" aria-label={`Percentiles oldest to latest: ${trend.map((r) => num(r.percentile)).join(', ')}`}>
+            {trend.map((r, i) => (
+              <div key={r.attempt_id} className="trend-col" title={`${r.title}, ${formatWhen(r.submitted_at)}: percentile ${num(r.percentile)}, rank ${r.rank} of ${r.of}`}>
+                <span className="trend-val">{i === trend.length - 1 || r === best ? Math.round(r.percentile) : ''}</span>
+                <div className="trend-track"><i style={{ height: `${Math.max(2, Number(r.percentile))}%` }} /></div>
+              </div>
+            ))}
+          </div>
+        </>
+      )}
+    </div>
   )
 }

@@ -19,6 +19,7 @@ export default function Results() {
   const [open, setOpen] = useState(() => new Set())
   const [stamp, setStamp] = useState(null)
   const [invites, setInvites] = useState([])
+  const [newPin, setNewPin] = useState(null)
 
   const load = useCallback(async () => {
     try {
@@ -45,6 +46,17 @@ export default function Results() {
     const t = setInterval(load, 10000)
     return () => clearInterval(t)
   }, [quiz?.status, stillWorking, load])
+
+  async function resetPin(r) {
+    if (!window.confirm(`Give ${r.name} a new PIN? Their old PIN stops working.`)) return
+    try {
+      const pin = await rpc('admin_reset_pin', { p_attempt: r.id })
+      setNewPin({ name: r.name, email: r.email, pin })
+      load()
+    } catch (e) {
+      setErr(e.message)
+    }
+  }
 
   async function adminReport(attemptId) {
     try {
@@ -138,18 +150,17 @@ export default function Results() {
   const arrow = (key) => (sort.key === key ? (sort.dir === 'desc' ? ' ↓' : ' ↑') : '')
   const toggle = (rid) => setOpen((s) => { const n = new Set(s); n.has(rid) ? n.delete(rid) : n.add(rid); return n })
 
-  const linkFor = (r) => `${window.location.origin}/q/${quiz.code}?a=${r.id}&t=${r.token}`
 
   function exportCsv() {
-    const head = ['Name', 'Email', 'Status', 'Rank', 'Percentile', 'Score', 'Correct', 'Wrong', 'Unattempted', 'Time taken (seconds)', 'Tab switches', 'Seconds away', 'Submitted at', 'How it ended', 'Result link',
+    const head = ['Name', 'Email', 'Status', 'Rank', 'Percentile', 'Score', 'Correct', 'Wrong', 'Unattempted', 'Time taken (seconds)', 'Tab switches', 'Seconds away', 'Submitted at', 'How it ended',
       ...qs.map((_, i) => `Q${i + 1}`), ...qs.map((_, i) => `Q${i + 1} seconds`)]
     const body = sorted.map((r) => [
       r.name, r.email, r.status, rankOf.get(r.id) ?? '', pctOf(r) == null ? '' : Math.round(pctOf(r) * 100) / 100,
       r.score ?? '', r.correct ?? '', r.wrong ?? '', r.unattempted ?? '',
-      r.time_taken_seconds ?? '', r.tab_switches ?? 0, r.away_seconds ?? 0, r.submitted_at ?? '', r.submit_reason ?? '', linkFor(r),
+      r.time_taken_seconds ?? '', r.tab_switches ?? 0, r.away_seconds ?? 0, r.submitted_at ?? '', r.submit_reason ?? '',
       ...qs.map((q) => givenText(q, r.answers?.[q.id])), ...qs.map((q) => r.times?.[q.id] ?? ''),
     ])
-    const key = ['Answer key', '', '', '', '', '', '', '', '', '', '', '', '', '', '', ...qs.map((q) => keyText(q))]
+    const key = ['Answer key', '', '', '', '', '', '', '', '', '', '', '', '', '', ...qs.map((q) => keyText(q))]
     downloadCsv(`${quiz.code}-results.csv`, [head, key, ...body])
   }
 
@@ -222,7 +233,7 @@ export default function Results() {
                   <Fragment key={r.id}>
                     <tr>
                       <td className="n">{rankOf.get(r.id) ?? '-'}</td>
-                      <td><Link to={`/admin/students/${encodeURIComponent(r.email.toLowerCase())}`}><b>{r.name}</b></Link>{r.link_requested_at && <span className="chip">Asked for link</span>}</td>
+                      <td><Link to={`/admin/students/${encodeURIComponent(r.email.toLowerCase())}`}><b>{r.name}</b></Link>{r.link_requested_at && <span className="chip">Asked for help</span>}</td>
                       <td className="muted">{r.email}</td>
                       <td className="n"><b>{num(r.score)}</b></td>
                       <td className="n">{r.correct ?? '-'}</td>
@@ -242,14 +253,7 @@ export default function Results() {
                         <div className="row" style={{ gap: 16, flexWrap: 'nowrap' }}>
                           <button className="link" onClick={() => toggle(r.id)} aria-expanded={open.has(r.id)}>{open.has(r.id) ? 'Hide' : 'Answers'}</button>
                           {r.status === 'submitted' && <button className="link" onClick={() => adminReport(r.id)}>Report</button>}
-                          <button className="link" onClick={async () => {
-                            await copyText(linkFor(r))
-                            toast('Link copied')
-                            if (r.link_requested_at) {
-                              await supabase.from('attempts').update({ link_requested_at: null }).eq('id', r.id)
-                              load()
-                            }
-                          }}>Copy link</button>
+                          <button className="link" onClick={() => resetPin(r)}>Reset PIN</button>
                         </div>
                       </td>
                     </tr>
@@ -317,6 +321,22 @@ export default function Results() {
             </table>
           </div>
         </section>
+      )}
+      {newPin && (
+        <div className="scrim" role="dialog" aria-modal="true" aria-labelledby="pin-h">
+          <div className="dialog">
+            <h2 id="pin-h">New PIN for {newPin.name}</h2>
+            <p className="score" style={{ marginTop: 8, letterSpacing: '0.12em' }}>{newPin.pin}</p>
+            <p>Tell the student to open the quiz page, choose Find your result, and enter <b>{newPin.email}</b> with this PIN. They can change it from their result page. This PIN is not shown again.</p>
+            <div className="row">
+              <button className="btn" autoFocus onClick={async () => {
+                await copyText(`GRADQUIZ ${quiz.title}: your new PIN is ${newPin.pin}. Open ${window.location.origin}/q/${quiz.code}, choose Find your result, and enter ${newPin.email} with this PIN.`)
+                toast('Message copied')
+              }}>Copy message</button>
+              <button className="btn ghost" onClick={() => setNewPin(null)}>Done</button>
+            </div>
+          </div>
+        </div>
       )}
       <p className="muted small">Started {formatWhen(quiz.started_at)}{quiz.ended_at ? `. Ended ${formatWhen(quiz.ended_at)}.` : '.'}</p>
     </main>

@@ -1,6 +1,7 @@
 import { Routes, Route, Navigate } from 'react-router-dom'
 import { ToastProvider } from './components/Toast.jsx'
 import Home from './pages/Home.jsx'
+import Library from './pages/Library.jsx'
 import StudentQuiz from './pages/StudentQuiz.jsx'
 import AdminGate from './pages/admin/AdminGate.jsx'
 import Dashboard from './pages/admin/Dashboard.jsx'
@@ -26,6 +27,7 @@ export default function App() {
       <Routes>
         <Route path="/" element={<Home />} />
         <Route path="/q/:code" element={<StudentQuiz />} />
+        <Route path="/library" element={<Library />} />
         <Route path="/admin" element={<AdminGate />}>
           <Route index element={<Dashboard />} />
           <Route path="quiz/:id" element={<QuizEditor />} />

@@ -16,7 +16,7 @@ export default function Dashboard() {
     try {
       const data = check(await supabase
         .from('quizzes')
-        .select('id, code, title, status, access, starts_at, ends_at, duration_minutes, created_at, questions(count), attempts(count)')
+        .select('id, code, title, status, access, starts_at, ends_at, batch, topic, duration_minutes, created_at, questions(count), attempts(count)')
         .order('created_at', { ascending: false }))
       setQuizzes(data)
       const req = await supabase.from('attempts').select('quiz_id').not('link_requested_at', 'is', null)
@@ -70,10 +70,11 @@ export default function Dashboard() {
                 <tr key={q.id}>
                   <td>
                     <Link to={`/admin/quiz/${q.id}`}><b>{q.title}</b></Link>
+                    {q.batch && <span className="muted small" style={{ display: 'block' }}>{q.batch}{q.topic ? ` › ${q.topic}` : ''}</span>}
                     {q.access === 'invited' && <span className="chip">Invited only</span>}
                     {q.status === 'draft' && q.starts_at && <span className="chip">Starts {formatWhen(q.starts_at)}</span>}
                     {q.status === 'live' && q.ends_at && <span className="chip">Entry closes {formatWhen(q.ends_at)}</span>}
-                    {asks[q.id] > 0 && <Link to={`/admin/quiz/${q.id}/results`} className="chip">{asks[q.id]} asked for their link</Link>}
+                    {asks[q.id] > 0 && <Link to={`/admin/quiz/${q.id}/results`} className="chip">{asks[q.id]} asked for help</Link>}
                   </td>
                   <td><span className="codechip">{q.code}</span></td>
                   <td><span className={`status ${q.status}`}><i />{q.status === 'draft' ? 'Draft' : q.status === 'live' ? 'Live' : 'Ended'}</span></td>

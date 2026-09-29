@@ -1468,7 +1468,7 @@ begin
     'starts_at', case when q.status = 'draft' then q.starts_at end,
     'ends_at', case when q.status <> 'ended' then q.ends_at end,
     'server_now', now(),
-    'practice', (q.allow_practice and q.status = 'ended' and q.access = 'open'),
+    'practice', false,
     'duration_minutes', q.duration_minutes,
     'marks_correct', q.marks_correct,
     'marks_wrong', q.marks_wrong,
@@ -1479,8 +1479,7 @@ end $$;
 
 -- ---------- 2. practice ----------
 
--- Who may practise: a student with their own submitted attempt, or anyone with the code once an open quiz has ended.
--- Invited only quizzes need the student's own attempt.
+-- Only a student with their own submitted attempt may practise.
 create or replace function public._practice_quiz(p_code text, p_attempt uuid, p_token uuid) returns uuid
 language plpgsql security definer set search_path = public as $$
 declare q quizzes%rowtype;
@@ -1492,7 +1491,6 @@ begin
        select 1 from attempts where id = p_attempt and token = p_token and quiz_id = q.id and status = 'submitted') then
     return q.id;
   end if;
-  if q.status = 'ended' and q.access = 'open' then return q.id; end if;
   raise exception 'PRACTICE_NOT_OPEN';
 end $$;
 
@@ -1630,6 +1628,186 @@ revoke all on function public._state_json(uuid) from public, anon, authenticated
 grant execute on function public.get_report(uuid, uuid) to anon, authenticated;
 revoke all on function public.admin_report(uuid) from public, anon;
 grant execute on function public.admin_report(uuid) to authenticated;
+
+notify pgrst, 'reload schema';
+
+-- ================= v8: student progress (same as patch_progress.sql) =================
+
+create or replace function public.my_progress(p_items jsonb) returns jsonb
+language plpgsql stable security definer set search_path = public as $$
+begin
+  if p_items is null or jsonb_typeof(p_items) <> 'array' or jsonb_array_length(p_items) > 300 then
+    return '[]'::jsonb;
+  end if;
+  return (
+    with pairs as (
+      select case when (e ->> 'a') ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$' then (e ->> 'a')::uuid end as a,
+             case when (e ->> 't') ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$' then (e ->> 't')::uuid end as t
+      from jsonb_array_elements(p_items) e
+      where jsonb_typeof(e) = 'object'
+    ),
+    mine as (
+      select distinct a.* from attempts a join pairs p on a.id = p.a and a.token = p.t
+      where a.status = 'submitted' and a.score is not null
+    ),
+    scored as (
+      select b.id,
+             rank() over (partition by b.quiz_id order by b.score desc) as rk,
+             count(*) over (partition by b.quiz_id) as n,
+             100 * cume_dist() over (partition by b.quiz_id order by b.score) as pct,
+             avg(b.score) over (partition by b.quiz_id) as cavg
+      from attempts b
+      where b.status = 'submitted' and b.score is not null and b.quiz_id in (select quiz_id from mine)
+    )
+    select coalesce(jsonb_agg(jsonb_build_object(
+        'attempt_id', m.id, 'email', lower(m.email), 'name', m.name,
+        'title', z.title, 'code', z.code,
+        'submitted_at', m.submitted_at, 'time_taken_seconds', m.time_taken_seconds, 'duration_minutes', z.duration_minutes,
+        'score', m.score,
+        'total_marks', (select count(*) from questions x where x.quiz_id = z.id) * z.marks_correct,
+        'correct', m.correct, 'wrong', m.wrong, 'unattempted', m.unattempted,
+        'rank', s.rk, 'of', s.n, 'percentile', round(s.pct::numeric, 2), 'class_avg', round(s.cavg, 2))
+      order by m.submitted_at desc), '[]'::jsonb)
+    from mine m
+    join quizzes z on z.id = m.quiz_id and z.show_score
+    join scored s on s.id = m.id);
+end $$;
+
+grant execute on function public.my_progress(jsonb) to anon, authenticated;
+
+notify pgrst, 'reload schema';
+
+-- ================= v9: round 5 (same as patch_round5.sql) =================
+
+create or replace function public.set_quiz_status(p_quiz uuid, p_status text) returns void
+language plpgsql security definer set search_path = public as $$
+declare q quizzes%rowtype;
+begin
+  if not is_admin() then raise exception 'NOT_ADMIN'; end if;
+  select * into q from quizzes where id = p_quiz for update;
+  if not found then raise exception 'QUIZ_NOT_FOUND'; end if;
+
+  if p_status = 'live' and q.status = 'draft' then
+    if not exists (select 1 from questions where quiz_id = p_quiz) then raise exception 'NO_QUESTIONS'; end if;
+    update quizzes set status = 'live', started_at = now() where id = p_quiz;
+  elsif p_status = 'ended' and q.status = 'live' then
+    -- no new students can start. Anyone already working keeps their own timer and can finish.
+    update quizzes set status = 'ended', ended_at = now() where id = p_quiz;
+  elsif p_status = 'live' and q.status = 'ended' then
+    -- reopen: new students can start again. A past close-entry time is cleared so it does not end straight away.
+    update quizzes set status = 'live', ended_at = null, ends_at = null where id = p_quiz;
+  else
+    raise exception 'BAD_TRANSITION';
+  end if;
+end $$;
+
+revoke all on function public.set_quiz_status(uuid, text) from public, anon;
+grant execute on function public.set_quiz_status(uuid, text) to authenticated;
+
+-- Gives the student a new 4 digit PIN and returns it once so the admin can tell them.
+-- Also clears a lockout and any "asked for help" flag.
+create or replace function public.admin_reset_pin(p_attempt uuid) returns text
+language plpgsql security definer set search_path = public as $$
+declare v_pin text; v_salt text := gen_random_uuid()::text;
+begin
+  if not is_admin() then raise exception 'NOT_ADMIN'; end if;
+  if not exists (select 1 from attempts where id = p_attempt) then raise exception 'INVALID_ATTEMPT'; end if;
+  v_pin := lpad(((('x' || encode(gen_random_bytes(4), 'hex'))::bit(32)::bigint) % 10000)::text, 4, '0');
+  update attempts
+  set pin_salt = v_salt, pin_hash = _pin_hash(v_salt, v_pin), pin_fails = 0, pin_locked_until = null, link_requested_at = null
+  where id = p_attempt;
+  return v_pin;
+end $$;
+
+revoke all on function public.admin_reset_pin(uuid) from public, anon;
+grant execute on function public.admin_reset_pin(uuid) to authenticated;
+
+notify pgrst, 'reload schema';
+
+-- ================= v10: student library (same as patch_library.sql) =================
+
+alter table public.quizzes add column if not exists batch text;
+alter table public.quizzes add column if not exists topic text;
+alter table public.quizzes add column if not exists in_library boolean not null default true;
+
+do $$
+begin
+  if not exists (select 1 from pg_constraint where conrelid = 'public.quizzes'::regclass and conname = 'quizzes_batch_len') then
+    alter table public.quizzes add constraint quizzes_batch_len check (batch is null or length(batch) between 1 and 60);
+  end if;
+  if not exists (select 1 from pg_constraint where conrelid = 'public.quizzes'::regclass and conname = 'quizzes_topic_len') then
+    alter table public.quizzes add constraint quizzes_topic_len check (topic is null or length(topic) between 1 and 60);
+  end if;
+end $$;
+
+create index if not exists quizzes_batch on public.quizzes (lower(batch));
+
+-- p_items: the attempt ids and secrets this device holds, like my_progress.
+create or replace function public.my_library(p_items jsonb) returns jsonb
+language plpgsql security definer set search_path = public as $$
+declare v_emails text[]; v_batches text[];
+begin
+  if p_items is null or jsonb_typeof(p_items) <> 'array' or jsonb_array_length(p_items) > 300 then
+    return jsonb_build_object('emails', '[]'::jsonb, 'quizzes', '[]'::jsonb);
+  end if;
+
+  perform _apply_schedules();
+
+  -- who is this: every email with a matching attempt secret
+  select array_agg(distinct lower(a.email)) into v_emails
+  from attempts a
+  join (
+    select case when (e ->> 'a') ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$' then (e ->> 'a')::uuid end as a,
+           case when (e ->> 't') ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$' then (e ->> 't')::uuid end as t
+    from jsonb_array_elements(p_items) e where jsonb_typeof(e) = 'object'
+  ) p on a.id = p.a and a.token = p.t;
+
+  if v_emails is null then
+    return jsonb_build_object('emails', '[]'::jsonb, 'quizzes', '[]'::jsonb);
+  end if;
+
+  -- their batches: any batch of a quiz they attempted
+  select array_agg(distinct lower(z.batch)) into v_batches
+  from attempts a join quizzes z on z.id = a.quiz_id
+  where lower(a.email) = any (v_emails) and z.batch is not null;
+
+  return jsonb_build_object(
+    'emails', to_jsonb(v_emails),
+    'quizzes', coalesce((
+      select jsonb_agg(jsonb_build_object(
+          'code', z.code, 'title', z.title,
+          'batch', z.batch, 'topic', coalesce(z.topic, 'Other'),
+          'status', z.status,
+          'starts_at', case when z.status = 'draft' then z.starts_at end,
+          'ends_at', case when z.status = 'live' then z.ends_at end,
+          'opened_at', coalesce(z.started_at, z.starts_at, z.created_at),
+          'duration_minutes', z.duration_minutes,
+          'question_count', (select count(*) from questions x where x.quiz_id = z.id),
+          'practice', z.allow_practice,
+          'mine', (
+            select jsonb_build_object(
+              'status', m.status,
+              'submitted_at', m.submitted_at,
+              'score', case when z.show_score then m.score end,
+              'total_marks', case when z.show_score then (select count(*) from questions x where x.quiz_id = z.id) * z.marks_correct end,
+              'rank', case when z.show_score and m.status = 'submitted' then 1 + (select count(*) from attempts o where o.quiz_id = z.id and o.status = 'submitted' and o.score > m.score) end,
+              'of', case when z.show_score and m.status = 'submitted' then (select count(*) from attempts o where o.quiz_id = z.id and o.status = 'submitted' and o.score is not null) end,
+              'percentile', case when z.show_score and m.status = 'submitted' then round(100.0 *
+                  (select count(*) from attempts o where o.quiz_id = z.id and o.status = 'submitted' and o.score <= m.score) /
+                  nullif((select count(*) from attempts o where o.quiz_id = z.id and o.status = 'submitted' and o.score is not null), 0), 2) end)
+            from attempts m where m.quiz_id = z.id and lower(m.email) = any (v_emails)
+            order by m.started_at desc limit 1))
+        order by coalesce(z.started_at, z.starts_at, z.created_at) desc)
+      from quizzes z
+      where z.in_library and z.batch is not null and lower(z.batch) = any (coalesce(v_batches, '{}'))
+        and (z.status in ('live', 'ended') or (z.status = 'draft' and z.starts_at is not null))
+        and (z.access = 'open'
+             or exists (select 1 from quiz_invites i where i.quiz_id = z.id and i.email = any (v_emails))
+             or exists (select 1 from attempts m where m.quiz_id = z.id and lower(m.email) = any (v_emails)))
+    ), '[]'::jsonb));
+end $$;
+
+grant execute on function public.my_library(jsonb) to anon, authenticated;
 
 notify pgrst, 'reload schema';
 

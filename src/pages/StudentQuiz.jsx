@@ -11,6 +11,18 @@ const skey = (code) => `gradquiz:${code}`
 const loadSaved = (code) => { try { return JSON.parse(localStorage.getItem(skey(code))) } catch { return null } }
 const saveSaved = (code, v) => { try { localStorage.setItem(skey(code), JSON.stringify(v)) } catch { /* private mode */ } }
 const dropSaved = (code) => { try { localStorage.removeItem(skey(code)) } catch { /* private mode */ } }
+// every attempt this device holds, for the overall summary
+const allSaved = () => {
+  const out = []
+  try {
+    for (let i = 0; i < localStorage.length; i++) {
+      const k = localStorage.key(i)
+      if (!k || !k.startsWith('gradquiz:') || k === 'gradquiz:me' || k.startsWith('gradquiz:ui:') || k.startsWith('gradquiz:practice:')) continue
+      try { const v = JSON.parse(localStorage.getItem(k)); if (v?.attemptId && v?.token) out.push({ a: v.attemptId, t: v.token }) } catch { /* skip */ }
+    }
+  } catch { /* private mode */ }
+  return out
+}
 const loadMe = () => { try { return JSON.parse(localStorage.getItem('gradquiz:me')) || {} } catch { return {} } }
 const saveMe = (v) => { try { localStorage.setItem('gradquiz:me', JSON.stringify(v)) } catch { /* private mode */ } }
 
@@ -796,6 +808,19 @@ function Exam({ init, creds, onDone }) {
 /* ------------------------------------------------------------------ */
 
 function Result({ res, onCheck, onReview, reviewErr, onSetPin, onPractice, onReport }) {
+  const [overall, setOverall] = useState(null)
+  useEffect(() => {
+    if (!res.show_score) return
+    const items = allSaved()
+    if (items.length < 2) return
+    rpc('my_progress', { p_items: items }).then((rows) => {
+      if (!Array.isArray(rows) || rows.length === 0) return
+      const me = rows.find((r) => r.title === res.title && Number(r.score) === Number(res.score))?.email || rows[0].email
+      const mine = rows.filter((r) => r.email === me)
+      if (mine.length < 2) return
+      setOverall({ n: mine.length, pct: mine.reduce((a, r) => a + Number(r.percentile), 0) / mine.length })
+    }).catch(() => { /* optional */ })
+  }, [res.show_score, res.title, res.score])
   const [repBusy, setRepBusy] = useState(false)
   const [repErr, setRepErr] = useState('')
   async function report() {
@@ -831,6 +856,12 @@ function Result({ res, onCheck, onReview, reviewErr, onSetPin, onPractice, onRep
               <div><b>{num(res.percentile)}</b>percentile</div>
               <p className="muted small">Percentile is the share of students who submitted with your score or lower. Both update as more students submit.</p>
             </div>
+          )}
+          {overall && (
+            <p className="muted small" style={{ marginTop: 14 }}>
+              Across your {overall.n} quizzes your average percentile is <b style={{ color: 'var(--ink)' }}>{num(Math.round(overall.pct * 10) / 10)}</b>.
+              {' '}<a href="/">See your progress</a>
+            </p>
           )}
           {Array.isArray(res.leaderboard) && res.leaderboard.length > 0 && (
             <div className="lboard">

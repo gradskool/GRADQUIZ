@@ -96,10 +96,23 @@ Run `supabase/patch_round3.sql` before deploying these pages.
 
 - **Top 3.** The leaderboard shows the top 3 by name.
 - **Maths.** Write maths between $ signs in questions, options and explanations: `$\frac{3}{4}$`, `$x^2$`, `$\sqrt{5}$`. Use `$$ ... $$` for a line of its own. Money like $5 and $10 stays plain text. Write `\$` for a literal dollar sign. The question form shows a live preview.
-- **Practice.** Tick "Let students practise again". After submitting, a student can practise untimed, and the score is never saved, so their first score and rank stay. Once an open quiz has ended, anyone with the code can practise it. Invited only quizzes need the student's own attempt.
+- **Practice.** Tick "Let students practise again". After submitting, a student can practise untimed, and the score is never saved, so their first score and rank stay. Only students who attempted can practise.
 - **PDF report.** Students press Download report on their result (needs the score to be shown; answers appear only when review is open). Admins press Report next to any submitted student in Results or on the Students page.
 
 Run `supabase/patch_round4.sql` before deploying these pages.
+
+## Student progress
+
+On the home page, Your results shows Your progress: quizzes taken, average percentile, average score, accuracy, best rank, how often they beat the class average, and a percentile trend. It covers every quiz on that device, plus any found with email and PIN. Each result page also shows the average percentile across their quizzes. Run `supabase/patch_progress.sql` once.
+
+## Reopen, Reset PIN
+
+- Ended quizzes have Reopen quiz. New students can start again; earlier attempts keep their scores. A Close entry time is cleared.
+- Results has Reset PIN per student. It shows a new 4 digit PIN once, with a message to copy. Personal links are no longer shown anywhere.
+
+## Student library
+
+Give each quiz a Batch and a Topic in Settings, and leave "Show in the students' library" on. Students open Your library from the home page. They see their batches (a student belongs to every batch of a quiz they attempted), with Live now, Coming up, and topics collapsed with "x of y done". Done quizzes open their result (and practice if on), missed ones show as missed, and ended quizzes cannot be attempted. A new device first needs Find all my results with email and PIN. Run `supabase/patch_library.sql` once.
 
 ## Paste format for many questions
 
