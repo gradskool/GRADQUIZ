@@ -83,6 +83,7 @@ export default function QuizEditor() {
         inLib: q.in_library !== false,
         board: Boolean(q.show_leaderboard),
         practice: Boolean(q.allow_practice),
+        calc: Boolean(q.calculator),
         shufQ: Boolean(q.shuffle_questions),
         shufO: Boolean(q.shuffle_options),
         startDate: toLocalInput(q.starts_at).slice(0, 10),
@@ -124,6 +125,7 @@ export default function QuizEditor() {
     form.inLib !== (quiz.in_library !== false) ||
     form.board !== Boolean(quiz.show_leaderboard) ||
     form.practice !== Boolean(quiz.allow_practice) ||
+    form.calc !== Boolean(quiz.calculator) ||
     (quiz.status !== 'ended' && form.endsAt !== toLocalInput(quiz.ends_at)) ||
     (draft && (
       form.shufQ !== Boolean(quiz.shuffle_questions) ||
@@ -172,6 +174,7 @@ export default function QuizEditor() {
       day_no: form.dayType === 'sectional' ? null : form.dayType ? Number(form.dayNo || 1) : null,
       part: ['core', 'challenge'].includes(form.dayType) ? (form.part || 'pre') : form.dayType === 'surprise' ? 'pre' : null,
       allow_practice: form.practice,
+      calculator: form.calc,
     }
     if (quiz.status !== 'ended') patch.ends_at = fromLocalInput(form.endsAt)
     if (draft) {
@@ -436,7 +439,9 @@ export default function QuizEditor() {
             <small style={{ display: 'block', marginTop: 8 }}>
               {form.access === 'invited'
                 ? 'Only emails on the invite list below can start. Each student gets a 6 digit code by email to prove the email is theirs.'
-                : 'Anyone with the code or link can start.'}
+                : programs.find((p) => p.name === form.program)?.roster_only
+                  ? `Only students on the ${form.program} list can start, with the code or link.`
+                  : 'Anyone with the code or link can start.'}
             </small>
           </fieldset>
           <label className="check">
@@ -454,6 +459,10 @@ export default function QuizEditor() {
           <label className="check">
             <input type="checkbox" checked={form.practice} onChange={set('practice')} />
             <span>Let students practise again after they submit, untimed and not scored. Their first score and rank never change. Only students who attempted can practise. Practice shows the answers.</span>
+          </label>
+          <label className="check">
+            <input type="checkbox" checked={form.calc} onChange={set('calc')} />
+            <span>Give students an on-screen calculator, like the one in CAT (memory keys, square root, percent).</span>
           </label>
           <label className="check">
             <input type="checkbox" checked={form.shufQ} onChange={set('shufQ')} disabled={!draft} />

@@ -3,12 +3,16 @@
 -- A set is a shared passage (directions, data, a chart or a table) that several questions use. Students see the
 -- passage beside the question. Images are stored in the public Storage bucket quiz-images (only admins can upload)
 -- and are written into any text as a line like  ![](https://...)  . Tables are written as | a | b | rows.
+-- After submitting, students with scores shown see how they did on each set. A quiz can show an on-screen
+-- calculator (like CAT's) while it is taken.
 
 alter table public.questions add column if not exists set_no int;
 alter table public.questions add column if not exists set_body text;
 alter table public.questions drop constraint if exists questions_set_check;
 alter table public.questions add constraint questions_set_check check (
   (set_no is null and set_body is null) or (set_no between 1 and 500 and set_body is not null));
+
+alter table public.quizzes add column if not exists calculator boolean not null default false;
 
 -- ---------- images: public bucket, admins upload ----------
 
@@ -157,6 +161,85 @@ begin
     'total_marks', (select count(*) from questions where quiz_id = v_quiz) * q.marks_correct,
     'correct', c, 'wrong', wm + wt, 'unattempted', u,
     'items', items);
+end $$;
+
+-- ---------- set results and the calculator flag ----------
+
+create or replace function public._state_json(p_id uuid) returns jsonb
+language plpgsql security definer set search_path = public as $$
+declare a attempts%rowtype; q quizzes%rowtype; total numeric; rk jsonb;
+begin
+  select * into a from attempts where id = p_id;
+  select * into q from quizzes where id = a.quiz_id;
+  if a.status = 'in_progress' then
+    return jsonb_build_object(
+      'status', 'in_progress',
+      'attempt_id', a.id,
+      'started_at', a.started_at,
+      'deadline', a.deadline,
+      'server_now', now(),
+      'title', q.title,
+      'calculator', q.calculator,
+      'answers', a.answers,
+      'times', a.times,
+      'tabs', a.tab_switches,
+      'away', a.away_seconds,
+      'questions', _attempt_questions_json(a.id));
+  end if;
+  select count(*) * q.marks_correct into total from questions where quiz_id = a.quiz_id;
+  if q.show_score then rk := _rank_json(p_id); end if;
+  return jsonb_build_object(
+    'status', 'submitted',
+    'server_now', now(),
+    'title', q.title,
+    'submitted_at', a.submitted_at,
+    'reason', a.submit_reason,
+    'show_score', q.show_score,
+    'score', case when q.show_score then a.score end,
+    'correct', case when q.show_score then a.correct end,
+    'wrong', case when q.show_score then a.wrong end,
+    'unattempted', case when q.show_score then a.unattempted end,
+    'total_marks', case when q.show_score then total end,
+    'rank', rk -> 'rank',
+    'of', rk -> 'of',
+    'percentile', rk -> 'percentile',
+    'leaderboard', case when q.show_score and q.show_leaderboard then _leaderboard_json(p_id) end,
+    'time_taken_seconds', a.time_taken_seconds,
+    'has_pin', (a.pin_hash is not null),
+    'review_on', q.show_review,
+    'review_available', coalesce(_review_open(a.quiz_id), false),
+    'practice_available', q.allow_practice,
+    -- LRDI: how the student did on each set, in the order they saw the sets
+    'sets', case when q.show_score and exists (select 1 from questions x where x.quiz_id = q.id and x.set_no is not null) then (
+      select jsonb_agg(jsonb_build_object(
+          'set_no', g.set_no, 'n', g.n, 'tried', g.tried, 'correct', g.correct, 'time', g.secs,
+          'class_correct', (
+            select round(avg(c.k), 1) from (
+              select count(*) filter (where (t.graded ->> z2.id::text)::boolean) as k
+              from attempts t join questions z2 on z2.quiz_id = t.quiz_id and z2.set_no is not distinct from g.set_no
+              where t.quiz_id = q.id and t.status = 'submitted' group by t.id) c))
+        order by g.first)
+      from (
+        select z.set_no,
+               min(coalesce(array_position(a.q_order, z.id), z.position)) as first,
+               count(*) as n,
+               count(*) filter (where a.answers ? z.id::text) as tried,
+               count(*) filter (where (a.graded ->> z.id::text)::boolean) as correct,
+               coalesce(sum((a.times ->> z.id::text)::numeric), 0) as secs
+        from questions z where z.quiz_id = q.id group by z.set_no) g) end);
+end $$;
+
+create or replace function public.practice_questions(p_code text, p_attempt uuid default null, p_token uuid default null) returns jsonb
+language plpgsql security definer set search_path = public as $$
+declare v_quiz uuid; q quizzes%rowtype;
+begin
+  v_quiz := _practice_quiz(p_code, p_attempt, p_token);
+  select * into q from quizzes where id = v_quiz;
+  return jsonb_build_object(
+    'title', q.title,
+    'calculator', q.calculator,
+    'marks_correct', q.marks_correct, 'marks_wrong', q.marks_wrong, 'marks_wrong_tita', q.marks_wrong_tita,
+    'questions', _questions_json(v_quiz));
 end $$;
 
 notify pgrst, 'reload schema';

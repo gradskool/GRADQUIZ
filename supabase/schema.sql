@@ -2134,7 +2134,7 @@ revoke all on function public._week_label(uuid) from public, anon, authenticated
 
 create or replace function public.my_library(p_items jsonb) returns jsonb
 language plpgsql security definer set search_path = public as $$
-declare v_emails text[]; v_batches text[];
+declare v_emails text[]; v_batches text[]; v_progs text[];
 begin
   if p_items is null or jsonb_typeof(p_items) <> 'array' or jsonb_array_length(p_items) > 300 then
     return jsonb_build_object('emails', '[]'::jsonb, 'quizzes', '[]'::jsonb);
@@ -2155,6 +2155,14 @@ begin
     return jsonb_build_object('emails', '[]'::jsonb, 'quizzes', '[]'::jsonb);
   end if;
 
+  -- their programs: any roster they are on, plus any open program they have attempted in
+  select array_agg(distinct x.program) into v_progs from (
+    select m.program from program_members m where m.email = any (v_emails)
+    union
+    select y.program from attempts a2 join quizzes y on y.id = a2.quiz_id
+    where lower(a2.email) = any (v_emails)
+      and not coalesce((select p.roster_only from programs p where p.name = y.program), false)) x;
+
   -- their batches: any batch of a quiz they attempted
   select array_agg(distinct lower(z.batch)) into v_batches
   from attempts a join quizzes z on z.id = a.quiz_id
@@ -2162,6 +2170,36 @@ begin
 
   return jsonb_build_object(
     'emails', to_jsonb(v_emails),
+    -- week standings: total of the scored quizzes of each week they took part in, their rank, and the top 5
+    'weeks', coalesce((
+      with wq as (
+        select z.id, z.program, lower(z.batch) as b, z.week_no,
+               (select count(*) from questions x where x.quiz_id = z.id) * z.marks_correct as full_marks
+        from quizzes z
+        where z.week_no is not null and z.batch is not null and z.in_library and z.show_score
+          and z.status in ('live', 'ended') and z.program = any (coalesce(v_progs, '{}'))),
+      tot as (
+        select wq.program, wq.b, wq.week_no, lower(a.email) as email, sum(a.score) as total,
+               (array_agg(a.name order by a.started_at desc))[1] as name
+        from wq join attempts a on a.quiz_id = wq.id and a.status = 'submitted' and a.score is not null
+        group by 1, 2, 3, 4),
+      mine as (select distinct t.program, t.b, t.week_no from tot t where t.email = any (v_emails))
+      select jsonb_agg(jsonb_build_object(
+          'program', m.program, 'batch', m.b, 'week_no', m.week_no,
+          'full_marks', (select sum(w.full_marks) from wq w where w.program = m.program and w.b = m.b and w.week_no = m.week_no),
+          'of', (select count(*) from tot o where o.program = m.program and o.b = m.b and o.week_no = m.week_no),
+          'me', (select jsonb_build_object(
+                    'total', t.total,
+                    'rank', 1 + (select count(*) from tot o where o.program = m.program and o.b = m.b and o.week_no = m.week_no and o.total > t.total),
+                    'percentile', round(100.0 * (select count(*) from tot o where o.program = m.program and o.b = m.b and o.week_no = m.week_no and o.total <= t.total)
+                                        / nullif((select count(*) from tot o where o.program = m.program and o.b = m.b and o.week_no = m.week_no), 0), 2))
+                 from tot t where t.program = m.program and t.b = m.b and t.week_no = m.week_no and t.email = any (v_emails)
+                 order by t.total desc limit 1),
+          'top', (select jsonb_agg(jsonb_build_object('name', t.name, 'total', t.total, 'rank', t.rk) order by t.rk, t.name)
+                  from (select o.name, o.total, 1 + (select count(*) from tot o2 where o2.program = o.program and o2.b = o.b and o2.week_no = o.week_no and o2.total > o.total) as rk
+                        from tot o where o.program = m.program and o.b = m.b and o.week_no = m.week_no
+                        order by o.total desc, o.name limit 5) t)))
+      from mine m), '[]'::jsonb),
     'quizzes', coalesce((
       select jsonb_agg(jsonb_build_object(
           'code', z.code, 'program', z.program,
@@ -2213,18 +2251,22 @@ grant execute on function public.my_library(jsonb) to anon, authenticated;
 
 notify pgrst, 'reload schema';
 
--- ================= v13: LRDI sets, images and tables (same as patch_sets.sql) =================
+-- ================= v13: LRDI sets, images, tables, set results, calculator (same as patch_sets.sql) =================
 -- GRADQUIZ patch: LRDI sets, images, charts and tables. Run once in the Supabase SQL Editor, after patch_weeks.sql.
 -- Safe to run again.
 -- A set is a shared passage (directions, data, a chart or a table) that several questions use. Students see the
 -- passage beside the question. Images are stored in the public Storage bucket quiz-images (only admins can upload)
 -- and are written into any text as a line like  ![](https://...)  . Tables are written as | a | b | rows.
+-- After submitting, students with scores shown see how they did on each set. A quiz can show an on-screen
+-- calculator (like CAT's) while it is taken.
 
 alter table public.questions add column if not exists set_no int;
 alter table public.questions add column if not exists set_body text;
 alter table public.questions drop constraint if exists questions_set_check;
 alter table public.questions add constraint questions_set_check check (
   (set_no is null and set_body is null) or (set_no between 1 and 500 and set_body is not null));
+
+alter table public.quizzes add column if not exists calculator boolean not null default false;
 
 -- ---------- images: public bucket, admins upload ----------
 
@@ -2375,8 +2417,86 @@ begin
     'items', items);
 end $$;
 
-notify pgrst, 'reload schema';
+-- ---------- set results and the calculator flag ----------
 
+create or replace function public._state_json(p_id uuid) returns jsonb
+language plpgsql security definer set search_path = public as $$
+declare a attempts%rowtype; q quizzes%rowtype; total numeric; rk jsonb;
+begin
+  select * into a from attempts where id = p_id;
+  select * into q from quizzes where id = a.quiz_id;
+  if a.status = 'in_progress' then
+    return jsonb_build_object(
+      'status', 'in_progress',
+      'attempt_id', a.id,
+      'started_at', a.started_at,
+      'deadline', a.deadline,
+      'server_now', now(),
+      'title', q.title,
+      'calculator', q.calculator,
+      'answers', a.answers,
+      'times', a.times,
+      'tabs', a.tab_switches,
+      'away', a.away_seconds,
+      'questions', _attempt_questions_json(a.id));
+  end if;
+  select count(*) * q.marks_correct into total from questions where quiz_id = a.quiz_id;
+  if q.show_score then rk := _rank_json(p_id); end if;
+  return jsonb_build_object(
+    'status', 'submitted',
+    'server_now', now(),
+    'title', q.title,
+    'submitted_at', a.submitted_at,
+    'reason', a.submit_reason,
+    'show_score', q.show_score,
+    'score', case when q.show_score then a.score end,
+    'correct', case when q.show_score then a.correct end,
+    'wrong', case when q.show_score then a.wrong end,
+    'unattempted', case when q.show_score then a.unattempted end,
+    'total_marks', case when q.show_score then total end,
+    'rank', rk -> 'rank',
+    'of', rk -> 'of',
+    'percentile', rk -> 'percentile',
+    'leaderboard', case when q.show_score and q.show_leaderboard then _leaderboard_json(p_id) end,
+    'time_taken_seconds', a.time_taken_seconds,
+    'has_pin', (a.pin_hash is not null),
+    'review_on', q.show_review,
+    'review_available', coalesce(_review_open(a.quiz_id), false),
+    'practice_available', q.allow_practice,
+    -- LRDI: how the student did on each set, in the order they saw the sets
+    'sets', case when q.show_score and exists (select 1 from questions x where x.quiz_id = q.id and x.set_no is not null) then (
+      select jsonb_agg(jsonb_build_object(
+          'set_no', g.set_no, 'n', g.n, 'tried', g.tried, 'correct', g.correct, 'time', g.secs,
+          'class_correct', (
+            select round(avg(c.k), 1) from (
+              select count(*) filter (where (t.graded ->> z2.id::text)::boolean) as k
+              from attempts t join questions z2 on z2.quiz_id = t.quiz_id and z2.set_no is not distinct from g.set_no
+              where t.quiz_id = q.id and t.status = 'submitted' group by t.id) c))
+        order by g.first)
+      from (
+        select z.set_no,
+               min(coalesce(array_position(a.q_order, z.id), z.position)) as first,
+               count(*) as n,
+               count(*) filter (where a.answers ? z.id::text) as tried,
+               count(*) filter (where (a.graded ->> z.id::text)::boolean) as correct,
+               coalesce(sum((a.times ->> z.id::text)::numeric), 0) as secs
+        from questions z where z.quiz_id = q.id group by z.set_no) g) end);
+end $$;
+
+create or replace function public.practice_questions(p_code text, p_attempt uuid default null, p_token uuid default null) returns jsonb
+language plpgsql security definer set search_path = public as $$
+declare v_quiz uuid; q quizzes%rowtype;
+begin
+  v_quiz := _practice_quiz(p_code, p_attempt, p_token);
+  select * into q from quizzes where id = v_quiz;
+  return jsonb_build_object(
+    'title', q.title,
+    'calculator', q.calculator,
+    'marks_correct', q.marks_correct, 'marks_wrong', q.marks_wrong, 'marks_wrong_tita', q.marks_wrong_tita,
+    'questions', _questions_json(v_quiz));
+end $$;
+
+notify pgrst, 'reload schema';
 
 -- ================= v14: email code once per device (same as patch_device.sql) =================
 -- GRADQUIZ patch: email code once per device for listed-students programs (like LRDI).

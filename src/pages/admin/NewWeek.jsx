@@ -19,6 +19,8 @@ const addDays = (iso, k) => {
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`
 }
 const when = (date, time) => (date && time ? new Date(`${date}T${time}`).toISOString() : null)
+const x_label = (x) => (x.d.type === 'sectional' ? 'The Sectional' : `${x.d.label} ${x.p === 'post' ? 'Quiz' : 'Pre-quiz'}`)
+const niceTime = (iso) => new Date(iso).toLocaleString('en-IN', { weekday: 'short', day: 'numeric', month: 'short', hour: 'numeric', minute: '2-digit' })
 const niceDate = (iso) => (iso ? new Date(`${iso}T12:00`).toLocaleDateString('en-IN', { weekday: 'short', day: 'numeric', month: 'short' }) : '')
 
 export default function NewWeek() {
@@ -37,6 +39,12 @@ export default function NewWeek() {
     preMin: '10',
     postMin: '20',
     secMin: '40',
+    preClose: '', // pre-quiz entry closes this time on its day (blank: stays open)
+    postClose: '',
+    postCloseDay: '0', // 0 same day, 1 next day, 2 two days later
+    secClose: '',
+    practice: true,
+    calculator: true,
   })
   const [dates, setDates] = useState({}) // day key -> yyyy-mm-dd
   const [times, setTimes] = useState({}) // slot key -> hh:mm
@@ -88,6 +96,15 @@ export default function NewWeek() {
     date: dates[d.key] || '',
     time: timeOf(d, p),
   })))
+  // when entry closes for each quiz, from the week's closing rules
+  const closeOf = (x) => {
+    if (!x.date || !x.time) return null
+    const t = x.d.type === 'sectional' ? f.secClose : x.p === 'post' ? f.postClose : f.preClose
+    if (!t) return null
+    const day = x.p === 'post' ? addDays(x.date, Number(f.postCloseDay)) : x.date
+    return when(day, t)
+  }
+  plan.forEach((x) => { x.close = closeOf(x) })
   const toMake = plan.filter((x) => !x.skip)
 
   async function create(e) {
@@ -99,6 +116,8 @@ export default function NewWeek() {
     if (toMake.length === 0) return setErr('Everything in this plan already exists in that week.')
     const mins = [f.preMin, f.postMin, f.secMin].map(Number)
     if (mins.some((m) => !Number.isInteger(m) || m < 1 || m > 600)) return setErr('Times must be whole minutes from 1 to 600.')
+    const early = toMake.find((x) => x.close && x.close <= when(x.date, x.time))
+    if (early) return setErr(`${x_label(early)} would close before it starts. Check the closing times.`)
     const bad = toMake.find((x) => x.date && !x.time)
     if (bad) return setErr(`Give a time for ${bad.d.label}${bad.p ? ` ${bad.p === 'post' ? 'Quiz' : 'Pre-quiz'}` : ''}, or clear its date.`)
     setBusy(true)
@@ -117,6 +136,9 @@ export default function NewWeek() {
           part: x.d.type === 'sectional' ? null : x.p,
           duration_minutes: x.d.type === 'sectional' ? mins[2] : x.p === 'post' ? mins[1] : mins[0],
           starts_at: when(x.date, x.time),
+          ends_at: x.close,
+          allow_practice: f.practice,
+          calculator: f.calculator,
         }
         let done = null
         for (let i = 0; i < 5 && !done; i++) {
@@ -221,6 +243,48 @@ export default function NewWeek() {
         </div>
 
         <fieldset className="field" style={{ border: 0, padding: 0, margin: 0 }}>
+          <legend style={{ fontWeight: 700, marginBottom: 8 }}>Entry closes (optional)</legend>
+          <div className="grid3">
+            <label className="field">
+              <span>Pre-quizzes close at</span>
+              <input className="input" type="time" value={f.preClose} onChange={set('preClose')} />
+              <small>On their own day, like when the session starts. Empty: they stay open.</small>
+            </label>
+            <div className="field">
+              <span id="nw-postclose">Quizzes close at</span>
+              <div className="row" style={{ flexWrap: 'nowrap', gap: 8 }}>
+                <input className="input" type="time" aria-labelledby="nw-postclose" value={f.postClose} onChange={set('postClose')} />
+                <select className="input" aria-label="Which day quizzes close" value={f.postCloseDay} onChange={set('postCloseDay')}>
+                  <option value="0">same day</option>
+                  <option value="1">next day</option>
+                  <option value="2">2 days later</option>
+                </select>
+              </div>
+              <small>Empty: they stay open.</small>
+            </div>
+            <label className="field">
+              <span>Sectional closes at</span>
+              <input className="input" type="time" value={f.secClose} onChange={set('secClose')} />
+              <small>On its own day. Empty: it stays open.</small>
+            </label>
+          </div>
+          <small style={{ display: 'block', marginTop: 8 }}>
+            Anyone already working when entry closes finishes on their own timer. With the week order lock, a student who misses one before it closes stays locked for the rest of that week.
+          </small>
+        </fieldset>
+
+        <div className="stack" style={{ gap: 6 }}>
+          <label className="check">
+            <input type="checkbox" checked={f.practice} onChange={set('practice')} />
+            <span>Let students practise each quiz again after they submit (untimed, not scored, shows the answers)</span>
+          </label>
+          <label className="check">
+            <input type="checkbox" checked={f.calculator} onChange={set('calculator')} />
+            <span>On-screen calculator in every quiz of the week</span>
+          </label>
+        </div>
+
+        <fieldset className="field" style={{ border: 0, padding: 0, margin: 0 }}>
           <legend style={{ fontWeight: 700, marginBottom: 8 }}>Dates</legend>
           <div className="row" style={{ alignItems: 'flex-end' }}>
             <label className="field" style={{ maxWidth: 220 }}>
@@ -274,7 +338,7 @@ export default function NewWeek() {
             {plan.map((x) => (
               <li key={slotKey(x.d.type, x.d.no, x.p)} className={x.skip ? 'skip' : ''}>
                 <span>{x.title || '(topic missing)'}</span>
-                <span className="muted small">{x.skip ? 'already there' : x.date && x.time ? `${niceDate(x.date)}, ${x.time}` : 'no date yet'}</span>
+                <span className="muted small">{x.skip ? 'already there' : x.date && x.time ? `${niceDate(x.date)}, ${x.time}${x.close ? ` → closes ${niceTime(x.close)}` : ''}` : 'no date yet'}</span>
               </li>
             ))}
           </ul>

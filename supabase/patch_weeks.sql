@@ -72,7 +72,7 @@ revoke all on function public._week_label(uuid) from public, anon, authenticated
 
 create or replace function public.my_library(p_items jsonb) returns jsonb
 language plpgsql security definer set search_path = public as $$
-declare v_emails text[]; v_batches text[];
+declare v_emails text[]; v_batches text[]; v_progs text[];
 begin
   if p_items is null or jsonb_typeof(p_items) <> 'array' or jsonb_array_length(p_items) > 300 then
     return jsonb_build_object('emails', '[]'::jsonb, 'quizzes', '[]'::jsonb);
@@ -93,6 +93,14 @@ begin
     return jsonb_build_object('emails', '[]'::jsonb, 'quizzes', '[]'::jsonb);
   end if;
 
+  -- their programs: any roster they are on, plus any open program they have attempted in
+  select array_agg(distinct x.program) into v_progs from (
+    select m.program from program_members m where m.email = any (v_emails)
+    union
+    select y.program from attempts a2 join quizzes y on y.id = a2.quiz_id
+    where lower(a2.email) = any (v_emails)
+      and not coalesce((select p.roster_only from programs p where p.name = y.program), false)) x;
+
   -- their batches: any batch of a quiz they attempted
   select array_agg(distinct lower(z.batch)) into v_batches
   from attempts a join quizzes z on z.id = a.quiz_id
@@ -100,6 +108,36 @@ begin
 
   return jsonb_build_object(
     'emails', to_jsonb(v_emails),
+    -- week standings: total of the scored quizzes of each week they took part in, their rank, and the top 5
+    'weeks', coalesce((
+      with wq as (
+        select z.id, z.program, lower(z.batch) as b, z.week_no,
+               (select count(*) from questions x where x.quiz_id = z.id) * z.marks_correct as full_marks
+        from quizzes z
+        where z.week_no is not null and z.batch is not null and z.in_library and z.show_score
+          and z.status in ('live', 'ended') and z.program = any (coalesce(v_progs, '{}'))),
+      tot as (
+        select wq.program, wq.b, wq.week_no, lower(a.email) as email, sum(a.score) as total,
+               (array_agg(a.name order by a.started_at desc))[1] as name
+        from wq join attempts a on a.quiz_id = wq.id and a.status = 'submitted' and a.score is not null
+        group by 1, 2, 3, 4),
+      mine as (select distinct t.program, t.b, t.week_no from tot t where t.email = any (v_emails))
+      select jsonb_agg(jsonb_build_object(
+          'program', m.program, 'batch', m.b, 'week_no', m.week_no,
+          'full_marks', (select sum(w.full_marks) from wq w where w.program = m.program and w.b = m.b and w.week_no = m.week_no),
+          'of', (select count(*) from tot o where o.program = m.program and o.b = m.b and o.week_no = m.week_no),
+          'me', (select jsonb_build_object(
+                    'total', t.total,
+                    'rank', 1 + (select count(*) from tot o where o.program = m.program and o.b = m.b and o.week_no = m.week_no and o.total > t.total),
+                    'percentile', round(100.0 * (select count(*) from tot o where o.program = m.program and o.b = m.b and o.week_no = m.week_no and o.total <= t.total)
+                                        / nullif((select count(*) from tot o where o.program = m.program and o.b = m.b and o.week_no = m.week_no), 0), 2))
+                 from tot t where t.program = m.program and t.b = m.b and t.week_no = m.week_no and t.email = any (v_emails)
+                 order by t.total desc limit 1),
+          'top', (select jsonb_agg(jsonb_build_object('name', t.name, 'total', t.total, 'rank', t.rk) order by t.rk, t.name)
+                  from (select o.name, o.total, 1 + (select count(*) from tot o2 where o2.program = o.program and o2.b = o.b and o2.week_no = o.week_no and o2.total > o.total) as rk
+                        from tot o where o.program = m.program and o.b = m.b and o.week_no = m.week_no
+                        order by o.total desc, o.name limit 5) t)))
+      from mine m), '[]'::jsonb),
     'quizzes', coalesce((
       select jsonb_agg(jsonb_build_object(
           'code', z.code, 'program', z.program,

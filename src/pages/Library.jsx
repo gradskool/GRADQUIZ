@@ -313,6 +313,10 @@ export default function Library() {
                         <span className="meter" aria-hidden="true" style={t.counted ? undefined : { visibility: 'hidden' }}><i style={{ width: `${t.counted ? (100 * t.done) / t.counted : 0}%` }} /></span>
                         <span className="chev" aria-hidden="true">{open ? '−' : '+'}</span>
                       </button>
+                      {open && t.week && (() => {
+                        const wb = (data.weeks || []).find((w) => w.program === currentProg && w.batch === current.toLowerCase() && w.week_no === t.week)
+                        return wb ? <WeekBoard wb={wb} /> : null
+                      })()}
                       {open && (
                         <ul className="liblist">
                           {t.list.map((x, k) => (
@@ -336,6 +340,32 @@ export default function Library() {
         )}
       </main>
     </>
+  )
+}
+
+// Week standings: the student's total over the week's scored quizzes so far, and the top 5.
+function WeekBoard({ wb }) {
+  const me = wb.me
+  return (
+    <div className="weekboard">
+      <div className="wbme">
+        <span className="muted small">Your week total</span>
+        <span><b>{num(me.total)}</b><span className="muted"> / {num(wb.full_marks)} so far</span></span>
+        <span className="muted small">Rank {me.rank} of {wb.of} · {num(me.percentile)} percentile</span>
+      </div>
+      <div>
+      <p className="muted small" style={{ marginBottom: 4 }}>Top {wb.top.length} this week</p>
+      <ol className="wbtop" aria-label="Top 5 this week">
+        {wb.top.map((r, k) => (
+          <li key={k} className={r.rank === me.rank && Number(r.total) === Number(me.total) ? 'me' : ''}>
+            <span className="rk">{r.rank}</span>
+            <span className="nm">{r.name}</span>
+            <b>{num(r.total)}</b>
+          </li>
+        ))}
+      </ol>
+      </div>
+    </div>
   )
 }
 

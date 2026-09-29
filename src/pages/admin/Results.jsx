@@ -26,7 +26,7 @@ export default function Results() {
     try {
       await supabase.rpc('finalize_expired', { p_quiz: id })
       const q = check(await supabase.from('quizzes').select('*').eq('id', id).single())
-      const questions = check(await supabase.from('questions').select('id, position, kind, body, options, correct_index, accepted, bonus').eq('quiz_id', id).order('position'))
+      const questions = check(await supabase.from('questions').select('id, position, kind, body, options, correct_index, accepted, bonus, set_no').eq('quiz_id', id).order('position'))
       const attempts = check(await supabase.from('attempts').select('id, token, link_requested_at, name, email, status, submit_reason, started_at, submitted_at, answers, graded, correct, wrong, unattempted, score, time_taken_seconds, times, tab_switches, away_seconds').eq('quiz_id', id))
       const inv = check(await supabase.from('quiz_invites').select('email').eq('quiz_id', id).order('email'))
       setQuiz(q)
@@ -295,6 +295,8 @@ export default function Results() {
         </section>
       )}
 
+      {submitted.length > 0 && qs.some((q) => q.set_no) && <SetAnalysis qs={qs} submitted={submitted} />}
+
       {submitted.length > 0 && (
         <section className="block">
           <h2>By question</h2>
@@ -341,5 +343,61 @@ export default function Results() {
       )}
       <p className="muted small">Started {formatWhen(quiz.started_at)}{quiz.ended_at ? `. Ended ${formatWhen(quiz.ended_at)}.` : '.'}</p>
     </main>
+  )
+}
+// LRDI: how the class handled each set. Which sets students chose, how accurate they were, and how long they took.
+function SetAnalysis({ qs, submitted }) {
+  const groups = []
+  qs.forEach((q, i) => {
+    const key = q.set_no ?? `single-${q.id}`
+    let g = groups.find((x) => x.key === key)
+    if (!g) { g = { key, set_no: q.set_no, from: i + 1, to: i + 1, ids: [] }; groups.push(g) }
+    g.to = i + 1
+    g.ids.push(q.id)
+  })
+  const sets = groups.filter((g) => g.set_no)
+  const singles = groups.filter((g) => !g.set_no).flatMap((g) => g.ids)
+  if (singles.length) sets.push({ key: 'singles', set_no: null, ids: singles })
+  const stat = (g) => {
+    let tried = 0; let answered = 0; let right = 0; let time = 0
+    for (const r of submitted) {
+      const a = g.ids.filter((id) => r.answers && id in r.answers).length
+      if (a > 0) tried += 1
+      answered += a
+      right += g.ids.filter((id) => r.graded && r.graded[id] === true).length
+      time += g.ids.reduce((t, id) => t + Number(r.times?.[id] || 0), 0)
+    }
+    return {
+      tried,
+      avgRight: right / submitted.length,
+      acc: answered ? Math.round((100 * right) / answered) : null,
+      avgTime: tried ? time / tried : null,
+    }
+  }
+  return (
+    <section className="block">
+      <h2>By set</h2>
+      <p className="muted" style={{ marginBottom: 12 }}>How many students tried each set, their accuracy on the questions they answered, the average correct per student, and the time spent by those who tried it.</p>
+      <div className="tablewrap">
+        <table className="t">
+          <thead><tr><th>Set</th><th>Tried it</th><th className="n">Accuracy</th><th className="n">Avg correct</th><th className="n">Avg time</th></tr></thead>
+          <tbody>
+            {sets.map((g) => {
+              const x = stat(g)
+              const pct = Math.round((100 * x.tried) / submitted.length)
+              return (
+                <tr key={g.key}>
+                  <td>{g.set_no ? <><b>Set {g.set_no}</b> <span className="muted small">questions {g.from} to {g.to}</span></> : <b>Questions on their own ({g.ids.length})</b>}</td>
+                  <td><div className="bar-cell"><div className="meter"><i style={{ width: `${pct}%` }} /></div><span>{x.tried} of {submitted.length}</span></div></td>
+                  <td className="n">{x.acc == null ? '-' : `${x.acc}%`}</td>
+                  <td className="n">{num(Math.round(x.avgRight * 10) / 10)} / {g.ids.length}</td>
+                  <td className="n">{x.avgTime == null ? '-' : spoken(x.avgTime)}</td>
+                </tr>
+              )
+            })}
+          </tbody>
+        </table>
+      </div>
+    </section>
   )
 }

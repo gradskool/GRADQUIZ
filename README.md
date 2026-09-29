@@ -131,6 +131,8 @@ A week (named by its Topic) has Core, Challenge and Surprise days in any count (
 - **Week progress** (link under each week on the Quizzes page): every student against every quiz of the week, who is stuck and where, with Copy these emails.
 - In quiz Settings a date under Schedule gets 10:00 am for a Pre-quiz and 6:00 pm for a Quiz; change it if needed.
 - A scheduled Surprise day shows only as "revealed when it goes live" until it starts.
+- New week can also close entry: pre-quizzes at a time on their day (like when the session starts), quizzes the same or next day, the Sectional on its day. It can switch on practice and the calculator for the whole week.
+- **Week standings**: inside each week students see their week total so far, rank and percentile, and the top 5. Week progress shows each student's total and rank.
 
 Run `supabase/patch_weeks.sql` once, after patch_programs.sql.
 
@@ -141,6 +143,8 @@ Run `supabase/patch_weeks.sql` once, after patch_programs.sql.
 - **Sets**: questions sharing one passage. Students see it beside the question (above it on phones), tap a chart to zoom. Shuffling keeps a set together.
 - Paste many: start a set with `Set:` (or a Directions line), then the passage, then questions numbered `Q1.`, `Q2.`, and `End set`. A preview shows what will be added.
 - Boxes with pictures, tables or maths show a live preview as you type.
+- **By set**: after submitting, students (when scores are shown) see for each set how many they tried, got right, accuracy and time, with the class average. Results has a By set table for you.
+- **Calculator**: tick "Give students an on-screen calculator" in quiz Settings. A CAT-style calculator (memory keys, square root, percent) opens from the quiz bar and can be dragged.
 
 Run `supabase/patch_sets.sql` once, after patch_weeks.sql.
 

@@ -3,6 +3,7 @@ import { useParams, useSearchParams } from 'react-router-dom'
 import Brand from '../components/Brand.jsx'
 import MathText from '../components/MathText.jsx'
 import RichText from '../components/RichText.jsx'
+import Calculator from '../components/Calculator.jsx'
 
 // Moving to another question starts it at the top of the screen. Inside the same set on a phone,
 // skip past the passage (already read) to the question.
@@ -521,6 +522,7 @@ function Exam({ init, creds, onDone }) {
   const [answers, setAnswers] = useState(init.answers || {})
   const [idx, setIdx] = useState(0)
   useQuestionScroll(idx, qs)
+  const [calc, setCalc] = useState(false)
   const [left, setLeft] = useState(() => new Date(init.deadline).getTime() - new Date(init.server_now).getTime())
   const [sync, setSync] = useState('saved')
   const [confirm, setConfirm] = useState(false)
@@ -752,11 +754,13 @@ function Exam({ init, creds, onDone }) {
       <header className="exambar">
         <span className="title">{init.title}</span>
         <div className="row" style={{ gap: 18, flexWrap: 'nowrap' }}>
+          {init.calculator && <button type="button" className="calcbtn" aria-pressed={calc} onClick={() => setCalc((c) => !c)}>Calculator</button>}
           <span className={`sync ${sync === 'offline' || sync === 'lost' ? 'off' : ''}`} role="status">{syncText}</span>
           <span className={`timer ${left <= 300000 ? 'low' : ''}`} role="timer" aria-label="Time left">{clock(left / 1000)}</span>
         </div>
       </header>
 
+      {calc && <Calculator onClose={() => setCalc(false)} />}
       <div className={`examgrid ${qs.some((x) => x.set_body) ? 'wide' : ''}`}>
         <main>
           <p className="qmeta">
@@ -928,6 +932,7 @@ function Result({ res, onCheck, onReview, reviewErr, onSetPin, onPractice, onRep
               {' '}<a href="/">See your progress</a>
             </p>
           )}
+          {Array.isArray(res.sets) && res.sets.length > 0 && <SetResults sets={res.sets} />}
           {Array.isArray(res.leaderboard) && res.leaderboard.length > 0 && (
             <div className="lboard">
               <h3>Top {res.leaderboard.length}</h3>
@@ -980,6 +985,34 @@ function Result({ res, onCheck, onReview, reviewErr, onSetPin, onPractice, onRep
         </p>
         <PinBox hasPin={res.has_pin} onSave={onSetPin} />
       </div>
+    </div>
+  )
+}
+
+// LRDI: how each set went, in the order the student met them. Picking sets well matters as much as solving them.
+function SetResults({ sets }) {
+  let k = 0
+  return (
+    <div className="setres">
+      <h3>By set</h3>
+      <table>
+        <thead><tr><th>Set</th><th>Tried</th><th>Correct</th><th>Accuracy</th><th>Time</th><th>Class avg correct</th></tr></thead>
+        <tbody>
+          {sets.map((x, i) => {
+            const label = x.set_no == null ? 'Questions on their own' : `Set ${++k}`
+            return (
+              <tr key={i} className={x.tried === 0 ? 'skipped' : ''}>
+                <th scope="row">{label}<span className="muted small"> · {x.n} {x.n === 1 ? 'question' : 'questions'}</span></th>
+                <td>{x.tried}/{x.n}</td>
+                <td>{x.correct}</td>
+                <td>{x.tried ? `${Math.round((100 * x.correct) / x.tried)}%` : 'skipped'}</td>
+                <td>{spoken(x.time)}</td>
+                <td>{x.class_correct == null ? '–' : num(x.class_correct)}</td>
+              </tr>
+            )
+          })}
+        </tbody>
+      </table>
     </div>
   )
 }
@@ -1122,6 +1155,7 @@ function Practice({ code, creds, backLabel, onExit }) {
   const [answers, setAnswers] = useState(() => { try { return JSON.parse(localStorage.getItem(key)) || {} } catch { return {} } })
   const [idx, setIdx] = useState(0)
   useQuestionScroll(idx, data?.questions || [])
+  const [calc, setCalc] = useState(false)
   const [result, setResult] = useState(null)
   const [busy, setBusy] = useState(false)
   const [startedAt, setStartedAt] = useState(() => Date.now())
@@ -1217,10 +1251,12 @@ function Practice({ code, creds, backLabel, onExit }) {
       <header className="exambar">
         <span className="title">Practice · {data.title}</span>
         <div className="row" style={{ gap: 18, flexWrap: 'nowrap' }}>
+          {data.calculator && <button type="button" className="calcbtn" aria-pressed={calc} onClick={() => setCalc((c) => !c)}>Calculator</button>}
           <span className="sync">Not scored</span>
           <span className="timer" role="timer" aria-label="Time so far">{clock((now - startedAt) / 1000)}</span>
         </div>
       </header>
+      {calc && <Calculator onClose={() => setCalc(false)} />}
       <div className={`examgrid ${qs.some((x) => x.set_body) ? 'wide' : ''}`}>
         <main>
           <p className="qmeta">Question {idx + 1} of {qs.length}</p>
