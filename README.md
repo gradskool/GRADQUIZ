@@ -148,6 +148,17 @@ Run `supabase/patch_weeks.sql` once, after patch_programs.sql.
 
 Run `supabase/patch_sets.sql` once, after patch_weeks.sql.
 
+## Sign in with Google (proving the email is theirs)
+
+Invited only quizzes, and listed-students programs with "Email code once per device" ticked, ask the student to confirm their email. They tap **Continue with Google** and sign in with the Google account of that email; no email is sent. "No Google account? Email me a code" stays as a fallback.
+
+One-time setup:
+1. Google Cloud Console > APIs & Services > OAuth consent screen: External, app name, your email. Publish the app.
+2. Credentials > Create credentials > OAuth client ID > Web application. Authorized redirect URI: `https://<your-project-ref>.supabase.co/auth/v1/callback`. Copy the Client ID and Client secret.
+3. Supabase > Authentication > Sign In / Providers > Google: turn on, paste both, save.
+4. Supabase > Authentication > URL Configuration: Site URL `https://gradskool-quiz.netlify.app`, and add `https://gradskool-quiz.netlify.app/**` to Redirect URLs.
+5. Supabase > Authentication > Sign In / Providers: turn ON "Allow new users to sign up" (Google sign-in creates the student's account the first time). This is safe: only emails in the admins table can open the admin pages.
+
 ## Email code once per device
 
 For a listed-students program (like LRDI), tick "Email code once per device" under Programs. The first time a student starts one of its quizzes on a phone or computer, a 6 digit code is emailed (same Gmail setup as Invited only). That device is then trusted for that email for 60 days, so someone who only knows another student's email cannot start as them. "Forget devices" next to an email makes that student confirm again; removing a student forgets their devices. Run `supabase/patch_device.sql` once, after patch_sets.sql.

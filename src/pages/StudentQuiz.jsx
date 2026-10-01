@@ -34,7 +34,7 @@ function SetWrap({ q, qs, children }) {
     </div>
   )
 }
-import { rpc, sendQuizCode, toAppError } from '../lib/supabase.js'
+import { rpc, sendQuizCode, supabase, toAppError } from '../lib/supabase.js'
 import { LETTERS, clock, formatWhen, num, spoken } from '../lib/util.js'
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
@@ -241,6 +241,15 @@ export default function StudentQuiz() {
 
 /* ------------------------------------------------------------------ */
 
+const GoogleMark = () => (
+  <svg width="18" height="18" viewBox="0 0 48 48" aria-hidden="true" style={{ verticalAlign: '-3px', marginRight: 8 }}>
+    <path fill="#FFC107" d="M43.6 20.5H42V20H24v8h11.3C33.7 32.7 29.2 36 24 36c-6.6 0-12-5.4-12-12s5.4-12 12-12c3.1 0 5.8 1.2 7.9 3.1l5.7-5.7C34 6.1 29.3 4 24 4 12.9 4 4 12.9 4 24s8.9 20 20 20 20-8.9 20-20c0-1.3-.1-2.4-.4-3.5z" />
+    <path fill="#FF3D00" d="M6.3 14.7l6.6 4.8C14.7 15.1 19 12 24 12c3.1 0 5.8 1.2 7.9 3.1l5.7-5.7C34 6.1 29.3 4 24 4 16.3 4 9.7 8.3 6.3 14.7z" />
+    <path fill="#4CAF50" d="M24 44c5.2 0 9.9-2 13.4-5.2l-6.2-5.2C29.2 35.1 26.7 36 24 36c-5.2 0-9.6-3.3-11.3-8l-6.5 5C9.5 39.6 16.2 44 24 44z" />
+    <path fill="#1976D2" d="M43.6 20.5H42V20H24v8h11.3c-.8 2.2-2.2 4.2-4.1 5.6l6.2 5.2C37 39.2 44 34 44 24c0-1.3-.1-2.4-.4-3.5z" />
+  </svg>
+)
+
 function Lobby({ code, info, setInfo, onStarted, onFound, onPractice }) {
   const me = useMemo(loadMe, [])
   const [name, setName] = useState(me.name || '')
@@ -256,7 +265,36 @@ function Lobby({ code, info, setInfo, onStarted, onFound, onPractice }) {
   const invited = info.access === 'invited'
   const verify = Boolean(info.verify_device)
   const [needCode, setNeedCode] = useState(false) // this device is new for this email
-  const codeMode = invited || needCode
+  // proof that the email is theirs: Sign in with Google, or a code by email if they choose it
+  const ask = invited || needCode
+  const [useCode, setUseCode] = useState(false)
+  const codeMode = ask && useCode
+  const [gUser, setGUser] = useState(null) // { email } when signed in with Google
+  useEffect(() => {
+    const pick = (s) => {
+      const u = s?.user
+      const prov = [u?.app_metadata?.provider, ...(u?.app_metadata?.providers || [])]
+      setGUser(u?.email && prov.includes('google') ? { email: u.email.toLowerCase() } : null)
+    }
+    supabase.auth.getSession().then(({ data }) => pick(data.session))
+    const { data } = supabase.auth.onAuthStateChange((_e, s) => pick(s))
+    return () => data.subscription.unsubscribe()
+  }, [])
+  const gLocked = Boolean(gUser) && (invited || verify) // the email is the Google one
+  const typedEmail = gLocked ? gUser.email : email
+  async function google() {
+    setErr('')
+    saveMe({ ...loadMe(), name: name.trim() })
+    const { error } = await supabase.auth.signInWithOAuth({
+      provider: 'google',
+      options: { redirectTo: window.location.href.split('#')[0], queryParams: { prompt: 'select_account' } },
+    })
+    if (error) setErr(/not enabled|unsupported provider/i.test(error.message) ? 'Google sign-in is not set up yet. Tell your instructor.' : error.message)
+  }
+  async function signOut() {
+    await supabase.auth.signOut()
+    setGUser(null)
+  }
   const [sentTo, setSentTo] = useState('') // the email the code went to
   const [otp, setOtp] = useState('')
   const [sending, setSending] = useState(false)
@@ -272,7 +310,7 @@ function Lobby({ code, info, setInfo, onStarted, onFound, onPractice }) {
   // Checks name, email and PIN before a code is sent, so nobody gets a code and then hits a form error.
   function formProblem() {
     if (name.trim().replace(/\s+/g, ' ').length < 2) return 'Enter your full name.'
-    if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email.trim())) return 'Enter a valid email address.'
+    if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(typedEmail.trim())) return 'Enter a valid email address.'
     if (!/^[0-9]{4,6}$/.test(pin.trim())) return 'Choose a PIN with 4 to 6 digits.'
     return ''
   }
@@ -282,7 +320,7 @@ function Lobby({ code, info, setInfo, onStarted, onFound, onPractice }) {
     setSentNote('')
     const problem = formProblem()
     if (problem) return setErr(problem)
-    const to = email.trim().toLowerCase()
+    const to = typedEmail.trim().toLowerCase()
     setSending(true)
     try {
       const r = await sendQuizCode(code, to)
@@ -344,22 +382,23 @@ function Lobby({ code, info, setInfo, onStarted, onFound, onPractice }) {
   async function start(e) {
     e.preventDefault()
     setErr('')
-    if (invited && !sentTo) return sendCode()
+    if (ask && !gLocked && !useCode) return setErr('Continue with Google first, or choose to get a code by email.')
+    if (codeMode && !sentTo) return sendCode()
     const problem = formProblem()
     if (problem) return setErr(problem)
     if (codeMode && !/^[0-9]{6}$/.test(otp.trim())) return setErr('Type the 6 digit code from your email.')
     setBusy(true)
     try {
-      const who = (codeMode ? sentTo : email).trim().toLowerCase()
+      const who = (gLocked ? gUser.email : codeMode ? sentTo : email).trim().toLowerCase()
       const args = { p_code: code, p_name: name, p_email: who, p_pin: pin.trim() }
-      if (codeMode) args.p_otp = otp.trim()
+      if (codeMode && !gLocked) args.p_otp = otp.trim()
       if (verify && deviceFor(who)) args.p_device = deviceFor(who)
       const st = await rpc('start_attempt', args)
       if (st?.error === 'NEED_CODE') {
-        // first time on this device for this email: email a code, then Start again with it
+        // first time on this device for this email: ask them to prove it with Google (or a code by email)
         setNeedCode(true)
         setBusy(false)
-        await sendCode()
+        if (useCode) await sendCode()
         return
       }
       if (st?.error) throw toAppError(st.error)
@@ -439,7 +478,7 @@ function Lobby({ code, info, setInfo, onStarted, onFound, onPractice }) {
             </label>
             <label className="field">
               <span>Email</span>
-              <input className="input" type="email" value={email} onChange={(e) => setEmail(e.target.value)} autoComplete="email" inputMode="email" required readOnly={Boolean(sentTo) && codeMode} />
+              <input className="input" type="email" value={typedEmail} onChange={(e) => setEmail(e.target.value)} autoComplete="email" inputMode="email" required readOnly={gLocked || (Boolean(sentTo) && codeMode)} />
             </label>
           </div>
           <label className="field" style={{ maxWidth: 260 }}>
@@ -447,37 +486,50 @@ function Lobby({ code, info, setInfo, onStarted, onFound, onPractice }) {
             <input className="input" value={pin} onChange={(e) => setPin(e.target.value.replace(/\D/g, '').slice(0, 6))} inputMode="numeric" autoComplete="off" maxLength={6} placeholder="4 to 6 digits" required />
             <small>Choose a PIN you will remember. With your email it lets you see your result again later. Do not use a phone number.</small>
           </label>
-          {needCode && sentTo && (
-            <div className="notice plain" role="status">
-              First time on this device with <b>{sentTo}</b>. We emailed a 6 digit code to confirm it is you. After this, this device will not need a code for 60 days.
+          {ask && !gLocked && !useCode && (
+            <div className="notice plain gbox" role="status">
+              <p>
+                {invited ? 'This quiz is only for invited students.' : 'This phone or computer is new for this email.'}
+                {' '}Confirm it is you with the Google account of the email your instructor has for you.
+                {!invited && ' After this, this device will not ask again for 60 days.'}
+              </p>
+              <div className="row" style={{ marginTop: 12 }}>
+                <button type="button" className="btn gbtn" onClick={google}><GoogleMark /> Continue with Google</button>
+                <button type="button" className="link small" onClick={() => { setUseCode(true); sendCode() }}>No Google account? Email me a code</button>
+              </div>
             </div>
           )}
-          {codeMode && sentTo && (
+          {gLocked && (
+            <p className="small">
+              Signed in with Google as <b>{gUser.email}</b>.{' '}
+              <button type="button" className="link" onClick={signOut}>Use another account</button>
+            </p>
+          )}
+          {codeMode && !gLocked && sentTo && (
             <label className="field" style={{ maxWidth: 260 }}>
               <span>Code from your email</span>
               <input className="input codechip" value={otp} onChange={(e) => setOtp(e.target.value.replace(/\D/g, '').slice(0, 6))} inputMode="numeric" autoComplete="one-time-code" maxLength={6} placeholder="6 digits" autoFocus />
             </label>
           )}
-          {codeMode && sentNote && <p className="muted small" role="status">{sentNote}</p>}
+          {codeMode && !gLocked && sentNote && <p className="muted small" role="status">{sentNote}</p>}
           <p className="muted small">
-            {invited && !sentTo && 'This quiz is only for invited students. We will email you a code to confirm it is you. '}
-            {verify && !needCode && 'The first time you use a new phone or computer, we email you a code to confirm it is you. '}
+            {verify && !ask && !gLocked && 'The first time you use a new phone or computer, you confirm it is you with Google. '}
             Your timer starts when you press Start. You can attempt this quiz once. If the page closes, reopen this link on the same device to continue.
             {' '}Time spent on each question and switching away from this tab are recorded.
           </p>
           {err && <p className="error" role="alert">{err}</p>}
           <div className="row">
-            {invited && !sentTo ? (
+            {codeMode && !gLocked && !sentTo ? (
               <button className="btn" disabled={sending}>{sending ? 'Sending' : 'Send code to my email'}</button>
-            ) : (
+            ) : ask && !gLocked && !useCode ? null : (
               <button className="btn" disabled={busy}>{busy ? 'Starting' : 'Start quiz'}</button>
             )}
-            {codeMode && sentTo && (
+            {codeMode && !gLocked && sentTo && (
               <>
                 <button type="button" className="link" onClick={sendCode} disabled={sending || wait > 0}>
                   {sending ? 'Sending' : wait > 0 ? `Resend code in ${wait}s` : 'Resend code'}
                 </button>
-                <button type="button" className="link" onClick={() => { setSentTo(''); setOtp(''); setSentNote(''); setErr(''); setNeedCode(false) }}>Change email</button>
+                <button type="button" className="link" onClick={() => { setSentTo(''); setOtp(''); setSentNote(''); setErr(''); setUseCode(false) }}>Change email</button>
               </>
             )}
           </div>

@@ -1,4 +1,7 @@
--- GRADQUIZ patch: email code once per device for listed-students programs (like LRDI).
+-- GRADQUIZ patch: proving the email is the student's, without trusting a typed email.
+-- Sign in with Google: a student signed in with Google as the same email needs no code (Invited only quizzes
+-- and the device check below). Turn on the Google provider in Supabase Auth (see README).
+-- Email code once per device for listed-students programs (like LRDI).
 -- Run once in the Supabase SQL Editor, after patch_sets.sql. Safe to run again.
 -- Turn it on per program under Admin > Programs. The first time a student starts a quiz of that program on a
 -- phone or laptop, a 6 digit code is emailed (same Gmail setup as Invited only). That device is then trusted
@@ -77,6 +80,8 @@ declare
   v_salt text; v_hash text;
   o quiz_otps%rowtype;
   v_verify boolean;
+  v_google boolean;
+  v_claims jsonb := nullif(current_setting('request.jwt.claims', true), '')::jsonb;
   v_dev text := nullif(btrim(coalesce(p_device, '')), '');
   v_newdev text;
 begin
@@ -101,9 +106,16 @@ begin
 
   -- email code once per device: a trusted device for this email goes straight in, otherwise the emailed code
   -- proves the email is theirs and this device is remembered for 60 days
+  -- signed in with Google as this very email: Google has proved it is theirs, no code needed
+  v_google := v_claims is not null and lower(coalesce(v_claims ->> 'email', '')) = v_email
+    and ((v_claims -> 'app_metadata' ->> 'provider') = 'google' or coalesce((v_claims -> 'app_metadata' -> 'providers') ? 'google', false));
+
   v_verify := q.access <> 'invited' and coalesce((select p.roster_only and p.verify_device from programs p where p.name = q.program), false);
   if v_verify then
-    if v_dev is not null and exists (select 1 from trusted_devices d where d.token_hash = _device_hash(v_dev) and d.email = v_email and d.expires_at > now()) then
+    if v_google then
+      v_newdev := replace(gen_random_uuid()::text, '-', '') || replace(gen_random_uuid()::text, '-', '');
+      insert into trusted_devices (token_hash, email, expires_at) values (_device_hash(v_newdev), v_email, now() + interval '60 days');
+    elsif v_dev is not null and exists (select 1 from trusted_devices d where d.token_hash = _device_hash(v_dev) and d.email = v_email and d.expires_at > now()) then
       update trusted_devices set last_used_at = now() where token_hash = _device_hash(v_dev);
     else
       if nullif(btrim(coalesce(p_otp, '')), '') is null then return jsonb_build_object('error', 'NEED_CODE'); end if;
@@ -124,13 +136,16 @@ begin
     if not exists (select 1 from quiz_invites where quiz_id = q.id and email = v_email) then
       raise exception 'NOT_INVITED';
     end if;
-    select * into o from quiz_otps where quiz_id = q.id and email = v_email for update;
-    if not found then return jsonb_build_object('error', 'OTP_MISSING'); end if;
-    if o.expires_at <= now() then return jsonb_build_object('error', 'OTP_EXPIRED'); end if;
-    if o.tries >= 5 then return jsonb_build_object('error', 'OTP_LOCKED'); end if;
-    if _pin_hash(o.salt, btrim(coalesce(p_otp, ''))) <> o.code_hash then
-      update quiz_otps set tries = tries + 1 where quiz_id = q.id and email = v_email;
-      return jsonb_build_object('error', case when o.tries + 1 >= 5 then 'OTP_LOCKED' else 'BAD_OTP' end);
+    if not v_google then
+      if nullif(btrim(coalesce(p_otp, '')), '') is null then return jsonb_build_object('error', 'NEED_CODE'); end if;
+      select * into o from quiz_otps where quiz_id = q.id and email = v_email for update;
+      if not found then return jsonb_build_object('error', 'OTP_MISSING'); end if;
+      if o.expires_at <= now() then return jsonb_build_object('error', 'OTP_EXPIRED'); end if;
+      if o.tries >= 5 then return jsonb_build_object('error', 'OTP_LOCKED'); end if;
+      if _pin_hash(o.salt, btrim(coalesce(p_otp, ''))) <> o.code_hash then
+        update quiz_otps set tries = tries + 1 where quiz_id = q.id and email = v_email;
+        return jsonb_build_object('error', case when o.tries + 1 >= 5 then 'OTP_LOCKED' else 'BAD_OTP' end);
+      end if;
     end if;
   end if;
 

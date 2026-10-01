@@ -540,3 +540,6 @@ tr.p-done .where { color: var(--ok); font-weight: 700; }
 .calckeys button.eq { grid-row: span 2; background: var(--coral); border-color: var(--coral); font-weight: 700; }
 .calckeys button.zero { grid-column: span 2; }
 @media (max-width: 480px) { .calc { right: 8px; left: 8px; bottom: 8px; width: auto; } }
+.gbtn { background: #fff; color: var(--ink); border: 1px solid var(--rule-strong); }
+.gbtn:hover { background: #f6f6f6; }
+.gbox p { margin: 0; }
