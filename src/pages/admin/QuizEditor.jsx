@@ -804,7 +804,7 @@ function SetHead({ no, body, first, count, onSave, locked }) {
           </div>
         </div>
       ) : (
-        <RichText className="setbody" style={{ whiteSpace: 'pre-wrap', marginTop: 10 }} text={body} />
+        <RichText paragraphs className="setbody" style={{ whiteSpace: 'pre-wrap', marginTop: 10 }} text={body} />
       )}
     </div>
   )
@@ -1021,7 +1021,7 @@ function BulkPreview({ questions }) {
       {questions.map((q, i) => (
         <Fragment key={i}>
           {q.set_no && q.set_no !== questions[i - 1]?.set_no && (
-            <div className="sethead"><p className="qmeta" style={{ margin: 0 }}><b>Set {q.set_no}</b> (new)</p><RichText className="setbody" style={{ whiteSpace: 'pre-wrap', marginTop: 10 }} text={q.set_body} /></div>
+            <div className="sethead"><p className="qmeta" style={{ margin: 0 }}><b>Set {q.set_no}</b> (new)</p><RichText paragraphs className="setbody" style={{ whiteSpace: 'pre-wrap', marginTop: 10 }} text={q.set_body} /></div>
           )}
           <div className={`qrow ${q.set_no ? 'inset' : ''}`}>
             <span className="no">{i + 1}</span>

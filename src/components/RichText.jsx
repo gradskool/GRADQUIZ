@@ -52,7 +52,8 @@ function blocks(s) {
   return out.map((b) => (b.t === 'text' ? { ...b, v: b.v.replace(/^\n+|\n+$/g, '') } : b)).filter((b) => b.t !== 'text' || b.v.trim())
 }
 
-export default function RichText({ text, as = 'div', className, style }) {
+// paragraphs: each line of text is its own paragraph with space between (reading passages)
+export default function RichText({ text, as = 'div', className, style, paragraphs = false }) {
   const s = text == null ? '' : String(text)
   const [zoom, setZoom] = useState(null)
   useEffect(() => {
@@ -62,7 +63,7 @@ export default function RichText({ text, as = 'div', className, style }) {
     return () => window.removeEventListener('keydown', esc)
   }, [zoom])
 
-  if (!hasRich(s)) return <MathText as={as} className={className} style={style} text={s} />
+  if (!hasRich(s) && !paragraphs) return <MathText as={as} className={className} style={style} text={s} />
   return (
     <div className={`rich ${className || ''}`} style={style}>
       {blocks(s).map((b, i) => {
@@ -82,6 +83,11 @@ export default function RichText({ text, as = 'div', className, style }) {
               </table>
             </div>
           )
+        }
+        if (paragraphs) {
+          // blank lines mark paragraphs when the text has them; otherwise every line is a paragraph
+          const paras = /\n\s*\n/.test(b.v) ? b.v.split(/\n\s*\n+/) : b.v.split(/\n+/)
+          return paras.filter((l) => l.trim()).map((l, k) => <MathText key={`${i}-${k}`} as="p" className="richtext para" text={l.trim()} />)
         }
         return <MathText key={i} as="p" className="richtext" text={b.v} />
       })}

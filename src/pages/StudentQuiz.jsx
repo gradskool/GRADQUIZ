@@ -28,7 +28,7 @@ function SetWrap({ q, qs, children }) {
     <div className="setsplit">
       <section className="setpane" aria-label="Set passage">
         <p className="qmeta">Set · {range}</p>
-        <RichText className="setbody" style={{ whiteSpace: 'pre-wrap' }} text={q.set_body} />
+        <RichText paragraphs className="setbody" style={{ whiteSpace: 'pre-wrap' }} text={q.set_body} />
       </section>
       <div className="qpane">{children}</div>
     </div>
@@ -1152,7 +1152,7 @@ function Review({ data, onBack, heading = 'Review', backLabel = 'Back to result'
             {it.set_body && it.set_no !== shown[n - 1]?.it.set_no && (
               <details className="setreview" open>
                 <summary>Set passage</summary>
-                <RichText className="setbody" style={{ whiteSpace: 'pre-wrap' }} text={it.set_body} />
+                <RichText paragraphs className="setbody" style={{ whiteSpace: 'pre-wrap' }} text={it.set_body} />
               </details>
             )}
             <RichText as="h2" className="qbody" style={{ fontWeight: 400 }} text={it.body} />

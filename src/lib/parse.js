@@ -62,7 +62,7 @@ export function parseQuestions(text) {
     const line = raw.trim()
     if (!line) {
       if (cur && cur.done) cur.inExp = false // a blank line ends an explanation
-      if (set && set.inBody && set.body) set.body += '\n'
+      if (set && set.inBody && set.body) set.gap = true // keep the blank line between paragraphs
       continue
     }
 
@@ -84,7 +84,7 @@ export function parseQuestions(text) {
       continue
     }
     if (set && set.inBody) {
-      if (!QSTRICT.test(line)) { set.body += (set.body && !set.body.endsWith('\n') ? '\n' : '') + line; continue }
+      if (!QSTRICT.test(line)) { set.body += (set.body ? (set.gap ? '\n\n' : '\n') : '') + line; set.gap = false; continue }
       set.inBody = false
       if (!set.body.trim()) errors.push(`Set ${set.no}: the passage is empty.`)
     }

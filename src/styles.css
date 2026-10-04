@@ -543,3 +543,4 @@ tr.p-done .where { color: var(--ok); font-weight: 700; }
 .gbtn { background: #fff; color: var(--ink); border: 1px solid var(--rule-strong); }
 .gbtn:hover { background: #f6f6f6; }
 .gbox p { margin: 0; }
+.rich .para + .para { margin-top: 0.8em; }
