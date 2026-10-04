@@ -132,7 +132,8 @@ export function parseQuestions(text) {
       if (set) set.count += 1
     } else if (cur.options.length === 0) {
       if (startsQ && /^\d/.test(line)) cur.numbered = true
-      cur.body += (cur.body ? '\n' : '') + line.replace(QPREFIX, '')
+      // numbered statements inside a question (1. 2. 3.) keep their numbers
+      cur.body += cur.body ? '\n' + line : line.replace(QPREFIX, '')
     } else {
       cur.options[cur.options.length - 1] += ' ' + line
     }
